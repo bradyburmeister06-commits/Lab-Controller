@@ -1,0 +1,11 @@
+{
+  "arduino": {
+    "port": "/dev/ttyACM0",
+    "baudrate": 9600
+  },
+  "relays": {
+    "SSR1": { "pulse_seconds": 5, "interval_hours": 1 },
+    "SSR2": { "pulse_seconds": 5, "interval_hours": 2 },
+    "SSR3": { "pulse_seconds": 5, "interval_hours": 4 }
+  }
+}

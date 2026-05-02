@@ -1,0 +1,15 @@
+services:
+  lab-controller:
+    build: .
+    container_name: lab-controller
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev/ttyACM0:/dev/ttyACM0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json
+
