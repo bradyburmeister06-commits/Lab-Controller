@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Machine Public Status</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101413;
+        --panel: #18201f;
+        --panel-2: #202a28;
+        --text: #eef3f0;
+        --muted: #a4ada9;
+        --border: #33413e;
+        --accent: #4fbbc3;
+        --gold: #fdab43;
+        --success: #80c96a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 15% 0%, rgba(79, 187, 195, 0.15), transparent 34rem), var(--bg);
+        color: var(--text);
+      }
+
+      header,
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      header {
+        padding: 34px 0 18px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(28px, 5vw, 48px);
+        letter-spacing: -0.05em;
+      }
+
+      h2 {
+        margin: 0 0 14px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      main {
+        display: grid;
+        gap: 18px;
+        padding-bottom: 42px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .two-col {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+        gap: 18px;
+      }
+
+      .card {
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent), var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 18px;
+        box-shadow: 0 18px 55px rgba(0, 0, 0, 0.18);
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+
+      .metric-value {
+        font-size: 28px;
+        font-weight: 780;
+        letter-spacing: -0.04em;
+      }
+
+      .metric-sub {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .sensor-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .sensor-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--panel-2);
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        width: fit-content;
+        border-radius: 999px;
+        padding: 6px 10px;
+        background: rgba(79, 187, 195, 0.12);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      canvas {
+        width: 100% !important;
+        max-height: 360px;
+      }
+
+      footer {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 4px 0 0;
+      }
+
+      @media (max-width: 900px) {
+        .grid,
+        .two-col {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="pill" id="statusPill">Loading status</div>
+      <h1>Machine Public Status</h1>
+      <p>Read-only status page for machine schedule, countdown, and room temperature/RH readings.</p>
+    </header>
+
+    <main>
+      <section class="grid">
+        <div class="card">
+          <div class="metric-label">Machine</div>
+          <div class="metric-value" id="machineName">Loading</div>
+          <div class="metric-sub" id="machineEnabled">Checking status</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Last turned on</div>
+          <div class="metric-value" id="lastOn">None</div>
+          <div class="metric-sub" id="lastOnStatus">No activation yet</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Next turn-on</div>
+          <div class="metric-value" id="nextOn">Unknown</div>
+          <div class="metric-sub" id="countdown">Waiting for schedule</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Room average</div>
+          <div class="metric-value" id="roomAverage">No data</div>
+          <div class="metric-sub" id="roomSensors">No sensors reporting</div>
+        </div>
+      </section>
+
+      <section class="two-col">
+        <div class="card">
+          <h2>Temperature and RH history</h2>
+          <canvas id="sensorChart" aria-label="Temperature and relative humidity time-series chart"></canvas>
+        </div>
+        <div class="card">
+          <h2>Latest Arduino readings</h2>
+          <div class="sensor-list" id="sensorList"></div>
+        </div>
+      </section>
+
+      <footer id="updatedAt">Last updated: never</footer>
+    </main>
+
+    <script>
+      let sensorChart;
+
+      function fmtDate(value) {
+        if (!value) return "None";
+        return new Date(value).toLocaleString();
+      }
+
+      function fmtCountdown(seconds) {
+        if (seconds === null || seconds === undefined) return "No scheduled run";
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return `${h}h ${m}m ${s}s`;
+      }
+
+      async function getJson(path) {
+        const response = await fetch(path);
+        if (!response.ok) throw new Error(`${path} failed with ${response.status}`);
+        return response.json();
+      }
+
+      function renderSensors(room) {
+        const target = document.getElementById("sensorList");
+        if (!room.latest_by_sensor.length) {
+          target.innerHTML = "<p>No Arduino readings have been received yet.</p>";
+          return;
+        }
+        target.innerHTML = room.latest_by_sensor
+          .map(
+            (sensor) => `
+              <div class="sensor-row">
+                <div>
+                  <strong>${sensor.sensor_name}</strong>
+                  <div class="metric-sub">Recorded ${fmtDate(sensor.recorded_at)}</div>
+                </div>
+                <div><strong>${sensor.temperature.toFixed(1)}°</strong> / ${sensor.relative_humidity.toFixed(1)}%</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function renderChart(readings) {
+        const ctx = document.getElementById("sensorChart");
+        const labels = readings.map((r) => new Date(r.recorded_at).toLocaleTimeString());
+        const sensors = [...new Set(readings.map((r) => r.sensor_name))];
+        const colors = ["#4fbbc3", "#fdab43", "#80c96a", "#dd6974"];
+        const datasets = [];
+
+        sensors.forEach((sensor, index) => {
+          datasets.push({
+            label: `${sensor} temp`,
+            data: readings.map((r) => (r.sensor_name === sensor ? r.temperature : null)),
+            borderColor: colors[index % colors.length],
+            backgroundColor: "transparent",
+            tension: 0.3,
+            spanGaps: true,
+            yAxisID: "temperature",
+          });
+          datasets.push({
+            label: `${sensor} RH`,
+            data: readings.map((r) => (r.sensor_name === sensor ? r.relative_humidity : null)),
+            borderColor: colors[(index + 1) % colors.length],
+            borderDash: [6, 4],
+            backgroundColor: "transparent",
+            tension: 0.3,
+            spanGaps: true,
+            yAxisID: "humidity",
+          });
+        });
+
+        if (sensorChart) sensorChart.destroy();
+        sensorChart = new Chart(ctx, {
+          type: "line",
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            interaction: { mode: "index", intersect: false },
+            plugins: { legend: { labels: { color: "#eef3f0" } } },
+            scales: {
+              x: { ticks: { color: "#a4ada9", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.08)" } },
+              temperature: {
+                position: "left",
+                title: { display: true, text: "Temperature", color: "#a4ada9" },
+                ticks: { color: "#a4ada9" },
+                grid: { color: "rgba(255,255,255,0.08)" },
+              },
+              humidity: {
+                position: "right",
+                min: 0,
+                max: 100,
+                title: { display: true, text: "RH %", color: "#a4ada9" },
+                ticks: { color: "#a4ada9" },
+                grid: { drawOnChartArea: false },
+              },
+            },
+          },
+        });
+      }
+
+      async function refresh() {
+        const [dashboard, readings] = await Promise.all([
+          getJson("/api/public/dashboard"),
+          getJson("/api/public/sensors/readings?hours=24&limit=5000"),
+        ]);
+
+        document.getElementById("statusPill").textContent = dashboard.machine.enabled ? "Machine schedule enabled" : "Machine schedule disabled";
+        document.getElementById("machineName").textContent = dashboard.machine.name;
+        document.getElementById("machineEnabled").textContent = `Every ${dashboard.machine.interval_seconds}s`;
+        document.getElementById("lastOn").textContent = dashboard.last_activation ? fmtDate(dashboard.last_activation.started_at) : "None";
+        document.getElementById("lastOnStatus").textContent = dashboard.last_activation ? dashboard.last_activation.status : "No activation yet";
+        document.getElementById("nextOn").textContent = fmtDate(dashboard.next_run_at);
+        document.getElementById("countdown").textContent = fmtCountdown(dashboard.seconds_until_next_run);
+        document.getElementById("roomAverage").textContent =
+          dashboard.room.average_temperature === null
+            ? "No data"
+            : `${dashboard.room.average_temperature.toFixed(1)}° / ${dashboard.room.average_relative_humidity.toFixed(1)}%`;
+        document.getElementById("roomSensors").textContent = `${dashboard.room.sensor_count} sensor(s) reporting`;
+        document.getElementById("updatedAt").textContent = `Last updated: ${new Date().toLocaleString()}`;
+
+        renderSensors(dashboard.room);
+        renderChart(readings);
+      }
+
+      refresh().catch((error) => {
+        document.getElementById("statusPill").textContent = error.message;
+        console.error(error);
+      });
+      setInterval(() => refresh().catch(console.error), 10000);
+    </script>
+  </body>
+</html>

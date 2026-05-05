@@ -1,22 +1,34 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    make \
-    wget \
-    libusb-1.0-0-dev \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget https://github.com/mccdaq/uldaq/releases/download/v1.2.1/libuldaq-1.2.1.tar.bz2 \
-    && tar -xjf libuldaq-1.2.1.tar.bz2 \
-    && cd libuldaq-1.2.1 \
-    && ./configure && make && make install && ldconfig
-
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
+COPY .env.example .env.example
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
-CMD ["python", "app/main.py"]
+RUN chmod +x ./docker-entrypoint.sh \
+    && mkdir -p /data
+
+ENV DATABASE_URL=sqlite:////data/machine_research.db
+ENV SENSOR_SIMULATOR=true
+ENV CORS_ORIGINS=*
+ENV ADMIN_USERNAME=admin
+ENV ADMIN_PASSWORD=change-me-now
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:8000/api/health || exit 1
+
+ENTRYPOINT ["./docker-entrypoint.sh"]

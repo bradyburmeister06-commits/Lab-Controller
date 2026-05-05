@@ -1,15 +1,35 @@
 services:
-  lab-controller:
+  machine-research-backend:
     build: .
-    container_name: lab-controller
+    image: machine-research-backend:latest
+    container_name: machine-research-backend
     restart: unless-stopped
-    privileged: true
-    devices:
-      - /dev/bus/usb:/dev/bus/usb
-      - /dev/ttyACM0:/dev/ttyACM0
     ports:
-      - "8080:8080"
+      - "8000:8000"
     volumes:
-      - ./logs:/app/logs
-      - ./config.json:/app/config.json
+      - machine_research_data:/data
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite:////data/machine_research.db
+      CORS_ORIGINS: "*"
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: change-me-now
+      DEFAULT_MACHINE_ID: machine-1
+      DEFAULT_INTERVAL_SECONDS: 3600
+      ACTIVATION_DURATION_SECONDS: 5
+      SCHEDULER_TIMEZONE: America/Chicago
+      MACHINE_CONTROLLER: mock
+      SENSOR_SIMULATOR: "true"
+      ARDUINO_1_PORT: /dev/ttyACM0
+      ARDUINO_1_NAME: arduino-1
+      ARDUINO_2_PORT: /dev/ttyACM1
+      ARDUINO_2_NAME: arduino-2
+      ARDUINO_BAUDRATE: 9600
+    # When running with real Arduinos, set SENSOR_SIMULATOR=false above
+    # and uncomment the devices that match your host.
+    # devices:
+    #   - "/dev/ttyACM0:/dev/ttyACM0"
+    #   - "/dev/ttyACM1:/dev/ttyACM1"
 
+volumes:
+  machine_research_data:

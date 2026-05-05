@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Machine Research Sysadmin Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111615;
+        --panel: #18201f;
+        --panel-2: #202a28;
+        --text: #eef3f0;
+        --muted: #9fa9a5;
+        --border: #33413e;
+        --accent: #4fbbc3;
+        --accent-2: #fdab43;
+        --danger: #dd6974;
+        --success: #80c96a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top left, rgba(79, 187, 195, 0.14), transparent 32rem), var(--bg);
+        color: var(--text);
+      }
+
+      header {
+        padding: 28px clamp(18px, 4vw, 48px) 16px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(24px, 4vw, 38px);
+        letter-spacing: -0.04em;
+      }
+
+      h2 {
+        margin: 0 0 16px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      main {
+        padding: 24px clamp(18px, 4vw, 48px) 48px;
+        display: grid;
+        gap: 20px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .two-col {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+        gap: 20px;
+      }
+
+      .card {
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent), var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+
+      .metric-value {
+        font-size: 26px;
+        font-weight: 750;
+        letter-spacing: -0.03em;
+      }
+
+      .metric-sub {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      button,
+      select,
+      input {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-2);
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+        background: var(--accent);
+        color: #062527;
+        border-color: transparent;
+        font-weight: 700;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--text);
+        border-color: var(--border);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+
+      th,
+      td {
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 650;
+      }
+
+      .table-wrap {
+        overflow: auto;
+        max-height: 430px;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+
+      .tab {
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--border);
+      }
+
+      .tab.active {
+        background: var(--panel-2);
+        color: var(--text);
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        padding: 5px 9px;
+        background: rgba(79, 187, 195, 0.12);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      canvas {
+        width: 100% !important;
+        max-height: 340px;
+      }
+
+      @media (max-width: 980px) {
+        .grid,
+        .two-col {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Machine Research Sysadmin Dashboard</h1>
+      <p>Protected machine controls, activation history, Arduino temperature/RH readings, logs, and stored database totals.</p>
+    </header>
+
+    <main>
+      <section class="grid">
+        <div class="card">
+          <div class="metric-label">Machine</div>
+          <div class="metric-value" id="machineName">Loading</div>
+          <div class="metric-sub" id="machineEnabled">Checking status</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Last turn-on</div>
+          <div class="metric-value" id="lastOn">None</div>
+          <div class="metric-sub" id="lastOnStatus">No activation yet</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Next turn-on</div>
+          <div class="metric-value" id="nextOn">Unknown</div>
+          <div class="metric-sub" id="countdown">Waiting for schedule</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">Room average</div>
+          <div class="metric-value" id="roomAverage">No data</div>
+          <div class="metric-sub" id="roomSensors">No sensors reporting</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Controls</h2>
+        <div class="actions">
+          <button id="refreshButton" type="button">Refresh now</button>
+          <button id="triggerButton" type="button" class="secondary">Manual trigger</button>
+          <input id="intervalInput" type="number" min="60" step="60" placeholder="Interval seconds" />
+          <button id="saveIntervalButton" type="button" class="secondary">Save interval</button>
+          <select id="historyWindow">
+            <option value="1">Last 1 hour</option>
+            <option value="6">Last 6 hours</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+          </select>
+          <span class="status-pill" id="healthStatus">Backend status unknown</span>
+        </div>
+      </section>
+
+      <section class="two-col">
+        <div class="card">
+          <h2>Arduino sensor history</h2>
+          <canvas id="sensorChart" aria-label="Temperature and relative humidity time-series chart"></canvas>
+        </div>
+        <div class="card">
+          <h2>Latest by sensor</h2>
+          <div id="sensorCards" class="grid" style="grid-template-columns: 1fr;"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="tabs">
+          <button class="tab active" data-tab="readings">Sensor readings</button>
+          <button class="tab" data-tab="activations">Activations</button>
+          <button class="tab" data-tab="machines">Machines</button>
+          <button class="tab" data-tab="logs">Logs</button>
+          <button class="tab" data-tab="summary">Database summary</button>
+        </div>
+
+        <div id="tab-readings" class="table-wrap"></div>
+        <div id="tab-activations" class="table-wrap hidden"></div>
+        <div id="tab-machines" class="table-wrap hidden"></div>
+        <div id="tab-logs" class="table-wrap hidden"></div>
+        <div id="tab-summary" class="table-wrap hidden"></div>
+      </section>
+    </main>
+
+    <script>
+      const api = (path) => path;
+      let sensorChart;
+      let currentMachineId = "machine-1";
+
+      function fmtDate(value) {
+        if (!value) return "None";
+        return new Date(value).toLocaleString();
+      }
+
+      function fmtCountdown(seconds) {
+        if (seconds === null || seconds === undefined) return "No scheduled run";
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return `${h}h ${m}m ${s}s`;
+      }
+
+      async function getJson(path, options) {
+        const response = await fetch(api(path), options);
+        if (!response.ok) {
+          throw new Error(`${path} failed with ${response.status}`);
+        }
+        return response.json();
+      }
+
+      function renderTable(targetId, columns, rows) {
+        const target = document.getElementById(targetId);
+        if (!rows.length) {
+          target.innerHTML = "<p>No data yet.</p>";
+          return;
+        }
+        target.innerHTML = `
+          <table>
+            <thead><tr>${columns.map((col) => `<th>${col.label}</th>`).join("")}</tr></thead>
+            <tbody>
+              ${rows
+                .map(
+                  (row) =>
+                    `<tr>${columns.map((col) => `<td>${col.format ? col.format(row[col.key], row) : row[col.key] ?? ""}</td>`).join("")}</tr>`,
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `;
+      }
+
+      function renderSensorCards(room) {
+        const target = document.getElementById("sensorCards");
+        if (!room.latest_by_sensor.length) {
+          target.innerHTML = "<p>No Arduino readings have been stored yet.</p>";
+          return;
+        }
+        target.innerHTML = room.latest_by_sensor
+          .map(
+            (sensor) => `
+              <div class="card" style="box-shadow:none;">
+                <div class="metric-label">${sensor.sensor_name}</div>
+                <div class="metric-value">${sensor.temperature.toFixed(1)}° / ${sensor.relative_humidity.toFixed(1)}%</div>
+                <div class="metric-sub">Recorded ${fmtDate(sensor.recorded_at)}</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function renderChart(readings) {
+        const ctx = document.getElementById("sensorChart");
+        const labels = readings.map((r) => new Date(r.recorded_at).toLocaleTimeString());
+        const sensors = [...new Set(readings.map((r) => r.sensor_name))];
+        const colors = ["#4fbbc3", "#fdab43", "#80c96a", "#dd6974"];
+        const datasets = [];
+
+        sensors.forEach((sensor, index) => {
+          datasets.push({
+            label: `${sensor} temp`,
+            data: readings.map((r) => (r.sensor_name === sensor ? r.temperature : null)),
+            borderColor: colors[index % colors.length],
+            backgroundColor: "transparent",
+            tension: 0.3,
+            spanGaps: true,
+            yAxisID: "temperature",
+          });
+          datasets.push({
+            label: `${sensor} RH`,
+            data: readings.map((r) => (r.sensor_name === sensor ? r.relative_humidity : null)),
+            borderColor: colors[(index + 1) % colors.length],
+            borderDash: [6, 4],
+            backgroundColor: "transparent",
+            tension: 0.3,
+            spanGaps: true,
+            yAxisID: "humidity",
+          });
+        });
+
+        if (sensorChart) sensorChart.destroy();
+        sensorChart = new Chart(ctx, {
+          type: "line",
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+              legend: { labels: { color: "#eef3f0" } },
+            },
+            scales: {
+              x: { ticks: { color: "#9fa9a5", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.08)" } },
+              temperature: {
+                type: "linear",
+                position: "left",
+                title: { display: true, text: "Temperature", color: "#9fa9a5" },
+                ticks: { color: "#9fa9a5" },
+                grid: { color: "rgba(255,255,255,0.08)" },
+              },
+              humidity: {
+                type: "linear",
+                position: "right",
+                title: { display: true, text: "RH %", color: "#9fa9a5" },
+                ticks: { color: "#9fa9a5" },
+                grid: { drawOnChartArea: false },
+                min: 0,
+                max: 100,
+              },
+            },
+          },
+        });
+      }
+
+      async function refreshAll() {
+        const hours = document.getElementById("historyWindow").value;
+        const [health, dashboard, readings, activations, machines, logs, summary] = await Promise.all([
+          getJson("/api/health"),
+          getJson("/api/dashboard"),
+          getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
+          getJson("/api/activations?limit=1000"),
+          getJson("/api/machines"),
+          getJson("/api/logs?limit=1000"),
+          getJson("/api/data/summary"),
+        ]);
+
+        currentMachineId = dashboard.machine.id;
+        document.getElementById("healthStatus").textContent = `Backend ${health.status}, scheduler ${health.scheduler_running ? "running" : "stopped"}`;
+        document.getElementById("machineName").textContent = dashboard.machine.name;
+        document.getElementById("machineEnabled").textContent = `${dashboard.machine.enabled ? "Enabled" : "Disabled"} · every ${dashboard.machine.interval_seconds}s`;
+        document.getElementById("intervalInput").value = dashboard.machine.interval_seconds;
+        document.getElementById("lastOn").textContent = dashboard.last_activation ? fmtDate(dashboard.last_activation.started_at) : "None";
+        document.getElementById("lastOnStatus").textContent = dashboard.last_activation ? dashboard.last_activation.status : "No activation yet";
+        document.getElementById("nextOn").textContent = fmtDate(dashboard.next_run_at);
+        document.getElementById("countdown").textContent = fmtCountdown(dashboard.seconds_until_next_run);
+        document.getElementById("roomAverage").textContent =
+          dashboard.room.average_temperature === null ? "No data" : `${dashboard.room.average_temperature.toFixed(1)}° / ${dashboard.room.average_relative_humidity.toFixed(1)}%`;
+        document.getElementById("roomSensors").textContent = `${dashboard.room.sensor_count} sensor(s) reporting`;
+
+        renderSensorCards(dashboard.room);
+        renderChart(readings);
+
+        renderTable("tab-readings", [
+          { key: "recorded_at", label: "Recorded", format: fmtDate },
+          { key: "sensor_name", label: "Sensor" },
+          { key: "temperature", label: "Temp", format: (v) => `${Number(v).toFixed(2)}°` },
+          { key: "relative_humidity", label: "RH", format: (v) => `${Number(v).toFixed(2)}%` },
+          { key: "raw_payload", label: "Raw payload" },
+        ], readings.slice().reverse());
+
+        renderTable("tab-activations", [
+          { key: "started_at", label: "Started", format: fmtDate },
+          { key: "completed_at", label: "Completed", format: fmtDate },
+          { key: "machine_id", label: "Machine" },
+          { key: "status", label: "Status" },
+          { key: "trigger_source", label: "Trigger" },
+          { key: "message", label: "Message" },
+        ], activations);
+
+        renderTable("tab-machines", [
+          { key: "id", label: "ID" },
+          { key: "name", label: "Name" },
+          { key: "enabled", label: "Enabled" },
+          { key: "interval_seconds", label: "Interval seconds" },
+          { key: "activation_duration_seconds", label: "Activation seconds" },
+          { key: "next_run_at", label: "Next run", format: fmtDate },
+        ], machines);
+
+        renderTable("tab-logs", [
+          { key: "created_at", label: "Created", format: fmtDate },
+          { key: "level", label: "Level" },
+          { key: "component", label: "Component" },
+          { key: "message", label: "Message" },
+        ], logs);
+
+        renderTable("tab-summary", [
+          { key: "name", label: "Table" },
+          { key: "count", label: "Rows" },
+        ], Object.entries(summary).map(([name, count]) => ({ name, count })));
+      }
+
+      document.getElementById("refreshButton").addEventListener("click", refreshAll);
+      document.getElementById("historyWindow").addEventListener("change", refreshAll);
+      document.getElementById("triggerButton").addEventListener("click", async () => {
+        await getJson(`/api/machines/${currentMachineId}/trigger`, { method: "POST" });
+        await refreshAll();
+      });
+      document.getElementById("saveIntervalButton").addEventListener("click", async () => {
+        const value = Number(document.getElementById("intervalInput").value);
+        await getJson(`/api/machines/${currentMachineId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ interval_seconds: value }),
+        });
+        await refreshAll();
+      });
+
+      document.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+          document.querySelectorAll("[id^='tab-']").forEach((panel) => panel.classList.add("hidden"));
+          tab.classList.add("active");
+          document.getElementById(`tab-${tab.dataset.tab}`).classList.remove("hidden");
+        });
+      });
+
+      refreshAll().catch((error) => {
+        document.getElementById("healthStatus").textContent = error.message;
+        console.error(error);
+      });
+      setInterval(() => refreshAll().catch(console.error), 10000);
+    </script>
+  </body>
+</html>
