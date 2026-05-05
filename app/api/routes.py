@@ -18,9 +18,11 @@ from app.schemas import (
     MachineOut,
     MachineUpdate,
     ManualTriggerOut,
+    RelayControllerInfoOut,
     RelayEventOut,
     RelayOut,
     RelaySetIn,
+    RelayUpdate,
     RoomSummaryOut,
     SensorLatestOut,
     SensorReadingOut,
@@ -50,8 +52,11 @@ def serialize_relay(relay: Relay) -> RelayOut:
     return RelayOut(
         id=relay.id,
         name=relay.name,
+        description=relay.description,
         bit_index=relay.bit_index,
         is_on=relay.is_on,
+        enabled=relay.enabled,
+        display_order=relay.display_order,
         last_changed_at=relay.last_changed_at,
     )
 
@@ -387,3 +392,51 @@ def admin_all_relay_events(
     db: Session = Depends(get_db),
 ) -> list[RelayEventOut]:
     return [serialize_relay_event(e) for e in relay_history(db, relay_id=None, limit=limit)]
+
+
+@router.patch("/relays/{relay_id}", response_model=RelayOut)
+def admin_update_relay(
+    relay_id: str,
+    payload: RelayUpdate,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    relay = db.get(Relay, relay_id)
+    if relay is None:
+        raise HTTPException(status_code=404, detail=f"Unknown relay_id: {relay_id}")
+    if payload.name is not None:
+        relay.name = payload.name
+    if payload.description is not None:
+        relay.description = payload.description
+    if payload.enabled is not None:
+        relay.enabled = payload.enabled
+    if payload.display_order is not None:
+        relay.display_order = payload.display_order
+    db.add(relay)
+    db.commit()
+    db.refresh(relay)
+    return serialize_relay(relay)
+
+
+@router.get("/relays-controller", response_model=RelayControllerInfoOut)
+def admin_relay_controller_info(
+    request: Request,
+    _: str = Depends(require_admin),
+) -> RelayControllerInfoOut:
+    settings = get_settings()
+    controller = getattr(request.app.state, "relay_controller", None)
+    initialized = False
+    latch = 0
+    if controller is not None:
+        latch = int(getattr(controller, "latch", 0)) & 0xFF
+        # Mock controllers have no _configured flag; treat as always ready.
+        initialized = bool(getattr(controller, "_configured", True))
+    return RelayControllerInfoOut(
+        mode=settings.relay_controller,
+        active_high=settings.relay_active_high,
+        board_num=settings.mcc_board_num,
+        digital_port=settings.mcc_digital_port,
+        bit_map=settings.relay_bit_map,
+        initialized=initialized,
+        latch=latch,
+    )

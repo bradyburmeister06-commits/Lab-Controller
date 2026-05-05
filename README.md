@@ -1012,7 +1012,35 @@ Invoke-RestMethod -Headers $headers http://localhost:8000/api/relays
 ### Dashboards
 
 - The **public** dashboard (`/`, `/public`) shows the three relay states read-only.
-- The **sysadmin** dashboard (`/admin`) shows ON/OFF/Toggle buttons per relay and a "Relay history" tab.
+- The **sysadmin** dashboard (`/admin`) provides a full **Relay Control** panel:
+  - Per-relay live state (ON / OFF) with a colored status indicator and last-changed timestamp.
+  - Bit / channel, configured digital port, active-high vs. active-low logic, controller mode
+    (`mock` or `mcc_usb1208fs_plus`), output latch, and "initialized" flag.
+  - Admin-only **Turn ON / Turn OFF / Toggle** buttons per relay. Each command shows
+    a status banner (in-progress, success, or error) so you know whether the command worked.
+  - An **Edit metadata** form per relay (display name, description, display order, enabled/disabled).
+    A relay marked disabled refuses ON / Toggle commands; OFF is always allowed for safety.
+  - A **Relay history** tab showing recent relay events (action, target state, trigger source,
+    success flag, message, timestamp) sourced from the `relay_events` table.
+- Hardware-level relay configuration (`RELAY_CONTROLLER`, `MCC_*`, bit map, `RELAY_ACTIVE_HIGH`)
+  is shown read-only on the dashboard and is changed via `.env` followed by a backend restart.
+  This is intentional — live reassignment of MCC bit mappings is **not** allowed from the UI
+  to avoid driving the wrong physical channel.
+- Mutation endpoints (`POST /api/relays/*`, `PATCH /api/relays/{id}`) require Basic Auth with
+  `ADMIN_USERNAME` / `ADMIN_PASSWORD`. Read-only state is also exposed at `GET /api/public/relays`
+  and as part of `GET /api/public/dashboard` for the public page.
+
+Additional admin API endpoints used by the dashboard:
+
+```bash
+# Edit relay metadata (name / description / enabled / display_order)
+curl -u admin:change-me-now -X PATCH http://localhost:8000/api/relays/relay-1 \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Vacuum pump", "description": "PB.0 line, opto-isolated module", "enabled": true, "display_order": 1}'
+
+# Inspect controller mode / port / bit map / latch (read-only; reflects .env)
+curl -u admin:change-me-now http://localhost:8000/api/relays-controller
+```
 
 ### Notes / quirks
 

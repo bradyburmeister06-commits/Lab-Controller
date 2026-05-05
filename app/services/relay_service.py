@@ -11,7 +11,9 @@ DEFAULT_RELAY_IDS = ("relay-1", "relay-2", "relay-3")
 
 
 def list_relays(db: Session) -> list[Relay]:
-    return list(db.execute(select(Relay).order_by(Relay.id)).scalars())
+    return list(
+        db.execute(select(Relay).order_by(Relay.display_order, Relay.id)).scalars()
+    )
 
 
 def get_relay(db: Session, relay_id: str) -> Relay:
@@ -42,6 +44,20 @@ def apply_state(
     trigger_source: str = "api",
 ) -> tuple[Relay, RelayEvent]:
     relay = get_relay(db, relay_id)
+    if on and not relay.enabled:
+        event = RelayEvent(
+            relay_id=relay.id,
+            state=relay.is_on,
+            action=action,
+            trigger_source=trigger_source,
+            success=False,
+            message=f"Relay {relay.id} is disabled in configuration; ignoring on command.",
+        )
+        db.add(event)
+        db.commit()
+        db.refresh(relay)
+        db.refresh(event)
+        return relay, event
     result = controller.set_state(relay_id, on)
     if result.success:
         relay.is_on = on

@@ -56,13 +56,33 @@ class RoomSummaryOut(BaseModel):
 class RelayOut(BaseModel):
     id: str
     name: str
+    description: str | None = None
     bit_index: int
     is_on: bool
+    enabled: bool = True
+    display_order: int = 0
     last_changed_at: datetime | None
 
 
 class RelaySetIn(BaseModel):
     on: bool
+
+
+class RelayUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool | None = None
+    display_order: int | None = Field(default=None, ge=0, le=999)
+
+
+class RelayControllerInfoOut(BaseModel):
+    mode: str
+    active_high: bool
+    board_num: int
+    digital_port: str
+    bit_map: dict[str, int]
+    initialized: bool
+    latch: int
 
 
 class RelayEventOut(BaseModel):

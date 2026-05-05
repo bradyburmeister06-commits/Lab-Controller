@@ -186,6 +186,150 @@
         display: none;
       }
 
+      .relay-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px;
+      }
+
+      .relay-card .meta {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 4px 12px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .relay-card .meta strong {
+        color: var(--text);
+        font-weight: 650;
+      }
+
+      .relay-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 22px;
+        font-weight: 750;
+      }
+
+      .relay-state .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--muted);
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.05);
+      }
+
+      .relay-state.is-on {
+        color: var(--success);
+      }
+
+      .relay-state.is-on .dot {
+        background: var(--success);
+        box-shadow: 0 0 12px rgba(128, 201, 106, 0.6);
+      }
+
+      .relay-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .relay-form input,
+      .relay-form textarea,
+      .relay-form select {
+        width: 100%;
+        background: var(--panel);
+        font-size: 13px;
+        padding: 8px 10px;
+      }
+
+      .relay-form textarea {
+        grid-column: 1 / -1;
+        resize: vertical;
+        min-height: 48px;
+        font-family: inherit;
+      }
+
+      .relay-form .full {
+        grid-column: 1 / -1;
+      }
+
+      .feedback {
+        display: none;
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        margin-top: 12px;
+      }
+
+      .feedback.show {
+        display: block;
+      }
+
+      .feedback.info {
+        background: rgba(79, 187, 195, 0.12);
+        color: var(--accent);
+        border: 1px solid rgba(79, 187, 195, 0.3);
+      }
+
+      .feedback.success {
+        background: rgba(128, 201, 106, 0.14);
+        color: var(--success);
+        border: 1px solid rgba(128, 201, 106, 0.3);
+      }
+
+      .feedback.error {
+        background: rgba(221, 105, 116, 0.14);
+        color: var(--danger);
+        border: 1px solid rgba(221, 105, 116, 0.35);
+      }
+
+      .relay-controller-info {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+        margin-bottom: 14px;
+        padding: 12px;
+        border: 1px dashed var(--border);
+        border-radius: 12px;
+      }
+
+      .relay-controller-info strong {
+        color: var(--text);
+        font-weight: 650;
+        display: block;
+        font-size: 14px;
+      }
+
+      .relay-controller-info .note {
+        grid-column: 1 / -1;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        font-size: 11px;
+        margin-left: 6px;
+        color: var(--muted);
+      }
+
+      .badge.disabled {
+        color: var(--danger);
+        background: rgba(221, 105, 116, 0.14);
+      }
+
       canvas {
         width: 100% !important;
         max-height: 340px;
@@ -258,8 +402,12 @@
       </section>
 
       <section class="card">
-        <h2>Relays</h2>
-        <div id="relayCards" class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));"></div>
+        <h2>Relay Control</h2>
+        <div id="relayControllerInfo" class="relay-controller-info">
+          <div class="note">Loading relay controller status...</div>
+        </div>
+        <div id="relayFeedback" class="feedback" role="status" aria-live="polite"></div>
+        <div id="relayCards" class="grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));"></div>
       </section>
 
       <section class="card">
@@ -411,62 +559,178 @@
 
       async function postJson(path) {
         const response = await fetch(api(path), { method: "POST" });
-        if (!response.ok) throw new Error(`${path} failed with ${response.status}`);
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(`${path} failed with ${response.status}${text ? ": " + text : ""}`);
+        }
         return response.json();
       }
 
-      function renderRelayCards(relays) {
+      async function patchJson(path, body) {
+        const response = await fetch(api(path), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(`${path} failed with ${response.status}${text ? ": " + text : ""}`);
+        }
+        return response.json();
+      }
+
+      let feedbackTimer;
+      function showRelayFeedback(level, message) {
+        const el = document.getElementById("relayFeedback");
+        el.className = `feedback show ${level}`;
+        el.textContent = message;
+        if (feedbackTimer) clearTimeout(feedbackTimer);
+        feedbackTimer = setTimeout(() => {
+          el.className = "feedback";
+        }, level === "error" ? 8000 : 4000);
+      }
+
+      function escapeHtml(value) {
+        if (value === null || value === undefined) return "";
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function renderRelayControllerInfo(info) {
+        const target = document.getElementById("relayControllerInfo");
+        if (!info) {
+          target.innerHTML = '<div class="note">Relay controller info unavailable.</div>';
+          return;
+        }
+        const isMcc = info.mode === "mcc_usb1208fs_plus";
+        target.innerHTML = `
+          <div><strong>${escapeHtml(info.mode)}</strong>Controller mode</div>
+          <div><strong>${info.active_high ? "active-high" : "active-low"}</strong>Logic level</div>
+          <div><strong>${escapeHtml(info.digital_port)}</strong>Digital port</div>
+          <div><strong>#${info.board_num}</strong>MCC board</div>
+          <div><strong>0x${(info.latch & 0xff).toString(16).toUpperCase().padStart(2, "0")}</strong>Output latch</div>
+          <div><strong>${info.initialized ? "yes" : "no"}</strong>Initialized</div>
+          <div class="note">Hardware-level relay configuration (controller mode, port, bit map, active-high) is environment-based and read-only here. To change it, edit <code>.env</code> and restart the backend. The MCC USB-1208FS-Plus mode requires Windows with the MCC Universal Library installed.</div>
+        `;
+      }
+
+      function renderRelayCards(relays, info) {
         const target = document.getElementById("relayCards");
         if (!relays.length) {
           target.innerHTML = "<p>No relays configured.</p>";
           return;
         }
+        const bitMap = (info && info.bit_map) || {};
         target.innerHTML = relays
-          .map(
-            (r) => `
-              <div class="card" style="box-shadow:none;">
-                <div class="metric-label">${r.name} (${r.id} · bit ${r.bit_index})</div>
-                <div class="metric-value" style="color:${r.is_on ? "var(--success)" : "var(--muted)"}">${r.is_on ? "ON" : "OFF"}</div>
-                <div class="metric-sub">Last changed ${fmtDate(r.last_changed_at)}</div>
-                <div class="actions" style="margin-top:10px;">
-                  <button type="button" data-relay-on="${r.id}">ON</button>
-                  <button type="button" class="secondary" data-relay-off="${r.id}">OFF</button>
-                  <button type="button" class="secondary" data-relay-toggle="${r.id}">Toggle</button>
+          .map((r) => {
+            const wiringBit = bitMap[r.id] !== undefined ? bitMap[r.id] : r.bit_index;
+            const enabledBadge = r.enabled
+              ? `<span class="badge">enabled</span>`
+              : `<span class="badge disabled">disabled</span>`;
+            return `
+              <div class="relay-card" data-relay-id="${escapeHtml(r.id)}">
+                <div>
+                  <div class="metric-label">${escapeHtml(r.name)} ${enabledBadge}</div>
+                  <div class="relay-state ${r.is_on ? "is-on" : ""}">
+                    <span class="dot"></span>${r.is_on ? "ON" : "OFF"}
+                  </div>
                 </div>
+                <div class="meta">
+                  <span>ID</span><strong>${escapeHtml(r.id)}</strong>
+                  <span>Bit / channel</span><strong>${wiringBit}${info ? " on " + escapeHtml(info.digital_port) : ""}</strong>
+                  <span>Logic</span><strong>${info ? (info.active_high ? "active-high" : "active-low") : "—"}</strong>
+                  <span>Display order</span><strong>${r.display_order}</strong>
+                  <span>Last changed</span><strong>${escapeHtml(fmtDate(r.last_changed_at))}</strong>
+                  ${r.description ? `<span>Notes</span><strong>${escapeHtml(r.description)}</strong>` : ""}
+                </div>
+                <div class="actions" style="margin-top:0;">
+                  <button type="button" data-relay-on="${escapeHtml(r.id)}" ${r.enabled ? "" : "disabled"}>Turn ON</button>
+                  <button type="button" class="secondary" data-relay-off="${escapeHtml(r.id)}">Turn OFF</button>
+                  <button type="button" class="secondary" data-relay-toggle="${escapeHtml(r.id)}" ${r.enabled ? "" : "disabled"}>Toggle</button>
+                </div>
+                <details>
+                  <summary style="cursor:pointer;color:var(--muted);font-size:13px;">Edit metadata</summary>
+                  <form class="relay-form" data-relay-form="${escapeHtml(r.id)}" style="margin-top:10px;">
+                    <label class="full">Display name<input name="name" value="${escapeHtml(r.name)}" required maxlength="120" /></label>
+                    <label>Display order<input name="display_order" type="number" min="0" max="999" value="${r.display_order}" /></label>
+                    <label>Enabled
+                      <select name="enabled">
+                        <option value="true" ${r.enabled ? "selected" : ""}>Enabled</option>
+                        <option value="false" ${!r.enabled ? "selected" : ""}>Disabled</option>
+                      </select>
+                    </label>
+                    <label class="full">Description / notes<textarea name="description" maxlength="2000">${escapeHtml(r.description || "")}</textarea></label>
+                    <div class="actions full" style="margin-top:0;">
+                      <button type="submit">Save metadata</button>
+                    </div>
+                  </form>
+                </details>
               </div>
-            `,
-          )
+            `;
+          })
           .join("");
 
-        target.querySelectorAll("[data-relay-on]").forEach((btn) =>
-          btn.addEventListener("click", async () => {
-            await postJson(`/api/relays/${btn.dataset.relayOn}/on`);
+        const wrapAction = async (label, fn) => {
+          showRelayFeedback("info", `${label}...`);
+          try {
+            const result = await fn();
+            showRelayFeedback("success", `${label} succeeded.`);
             await refreshAll();
-          }),
+            return result;
+          } catch (err) {
+            showRelayFeedback("error", `${label} failed: ${err.message || err}`);
+            console.error(err);
+          }
+        };
+
+        target.querySelectorAll("[data-relay-on]").forEach((btn) =>
+          btn.addEventListener("click", () =>
+            wrapAction(`Turn ${btn.dataset.relayOn} ON`, () => postJson(`/api/relays/${btn.dataset.relayOn}/on`)),
+          ),
         );
         target.querySelectorAll("[data-relay-off]").forEach((btn) =>
-          btn.addEventListener("click", async () => {
-            await postJson(`/api/relays/${btn.dataset.relayOff}/off`);
-            await refreshAll();
-          }),
+          btn.addEventListener("click", () =>
+            wrapAction(`Turn ${btn.dataset.relayOff} OFF`, () => postJson(`/api/relays/${btn.dataset.relayOff}/off`)),
+          ),
         );
         target.querySelectorAll("[data-relay-toggle]").forEach((btn) =>
-          btn.addEventListener("click", async () => {
-            await postJson(`/api/relays/${btn.dataset.relayToggle}/toggle`);
-            await refreshAll();
+          btn.addEventListener("click", () =>
+            wrapAction(`Toggle ${btn.dataset.relayToggle}`, () => postJson(`/api/relays/${btn.dataset.relayToggle}/toggle`)),
+          ),
+        );
+        target.querySelectorAll("[data-relay-form]").forEach((form) =>
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const relayId = form.dataset.relayForm;
+            const fd = new FormData(form);
+            const body = {
+              name: fd.get("name"),
+              description: fd.get("description") || "",
+              display_order: Number(fd.get("display_order")),
+              enabled: fd.get("enabled") === "true",
+            };
+            await wrapAction(`Save metadata for ${relayId}`, () => patchJson(`/api/relays/${relayId}`, body));
           }),
         );
       }
 
       async function refreshAll() {
         const hours = document.getElementById("historyWindow").value;
-        const [health, dashboard, readings, activations, machines, relays, relayEvents, logs, summary] = await Promise.all([
+        const [health, dashboard, readings, activations, machines, relays, relayController, relayEvents, logs, summary] = await Promise.all([
           getJson("/api/health"),
           getJson("/api/dashboard"),
           getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
           getJson("/api/activations?limit=1000"),
           getJson("/api/machines"),
           getJson("/api/relays"),
+          getJson("/api/relays-controller").catch((err) => {
+            console.warn("Could not load relay controller info", err);
+            return null;
+          }),
           getJson("/api/relay-events?limit=500"),
           getJson("/api/logs?limit=1000"),
           getJson("/api/data/summary"),
@@ -514,7 +778,8 @@
           { key: "next_run_at", label: "Next run", format: fmtDate },
         ], machines);
 
-        renderRelayCards(relays);
+        renderRelayControllerInfo(relayController);
+        renderRelayCards(relays, relayController);
 
         renderTable("tab-relays", [
           { key: "created_at", label: "Time", format: fmtDate },

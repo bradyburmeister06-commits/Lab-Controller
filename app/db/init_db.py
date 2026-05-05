@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -9,8 +10,31 @@ from app.db.models import Machine, Relay, utcnow
 from app.db.session import Base, engine
 
 
+_RELAY_COLUMN_MIGRATIONS: dict[str, str] = {
+    "description": "TEXT",
+    "enabled": "BOOLEAN NOT NULL DEFAULT 1",
+    "display_order": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _migrate_relay_columns() -> None:
+    """Add new optional columns to the relays table on existing SQLite databases."""
+
+    inspector = inspect(engine)
+    if "relays" not in inspector.get_table_names():
+        return
+    existing = {col["name"] for col in inspector.get_columns("relays")}
+    missing = [(name, ddl) for name, ddl in _RELAY_COLUMN_MIGRATIONS.items() if name not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, ddl in missing:
+            conn.execute(text(f"ALTER TABLE relays ADD COLUMN {name} {ddl}"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _migrate_relay_columns()
 
 
 def ensure_default_machine(db: Session) -> Machine:
@@ -37,20 +61,29 @@ def ensure_default_machine(db: Session) -> Machine:
 def ensure_default_relays(db: Session) -> list[Relay]:
     settings = get_settings()
     defaults = [
-        ("relay-1", "Relay 1", settings.relay_1_bit),
-        ("relay-2", "Relay 2", settings.relay_2_bit),
-        ("relay-3", "Relay 3", settings.relay_3_bit),
+        ("relay-1", "Relay 1", settings.relay_1_bit, 1),
+        ("relay-2", "Relay 2", settings.relay_2_bit, 2),
+        ("relay-3", "Relay 3", settings.relay_3_bit, 3),
     ]
     relays: list[Relay] = []
-    for relay_id, name, bit in defaults:
+    for relay_id, name, bit, order in defaults:
         relay = db.get(Relay, relay_id)
         if relay is None:
-            relay = Relay(id=relay_id, name=name, bit_index=bit, is_on=False)
+            relay = Relay(
+                id=relay_id,
+                name=name,
+                bit_index=bit,
+                is_on=False,
+                enabled=True,
+                display_order=order,
+            )
             db.add(relay)
         else:
             # Keep bit_index in sync with current configuration.
             if relay.bit_index != bit:
                 relay.bit_index = bit
+            if relay.display_order in (None, 0):
+                relay.display_order = order
         relays.append(relay)
     db.commit()
     for relay in relays:
