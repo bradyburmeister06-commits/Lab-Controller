@@ -9,15 +9,17 @@ from fastapi.responses import FileResponse
 from app.api.routes import router
 from app.auth import require_admin
 from app.config import get_settings
-from app.db.init_db import ensure_default_machine, init_db
+from app.db.init_db import ensure_default_machine, ensure_default_relays, init_db
 from app.db.session import SessionLocal
 from app.services.machine_controller import build_controller
+from app.services.relay_controller import build_relay_controller
 from app.services.scheduler import MachineScheduler
 from app.services.sensor_service import SensorDevice, SensorIngestionManager
 
 
 settings = get_settings()
 controller = build_controller(settings)
+relay_controller = build_relay_controller(settings)
 machine_scheduler = MachineScheduler(settings, controller)
 sensor_manager = SensorIngestionManager(
     devices=[
@@ -35,8 +37,17 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         ensure_default_machine(db)
+        ensure_default_relays(db)
+    try:
+        relay_controller.initialize()
+    except Exception as exc:
+        # Don't crash the app if hardware/library is unavailable; surface in logs.
+        import logging
+
+        logging.getLogger("app.relay").warning("Relay controller initialize failed: %s", exc)
     app.state.machine_scheduler = machine_scheduler
     app.state.sensor_manager = sensor_manager
+    app.state.relay_controller = relay_controller
     machine_scheduler.start()
     sensor_manager.start()
     yield

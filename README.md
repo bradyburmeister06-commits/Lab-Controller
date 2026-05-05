@@ -889,3 +889,134 @@ pytest
 ```
 
 Simulator mode inserts fake readings every 10 seconds for both Arduino names. This lets you build and verify the web app sensor cards and charts before the hardware is connected.
+
+## Relay control (MCC USB-1208FS-Plus)
+
+The backend can drive 3 relays via a Measurement Computing **USB-1208FS-Plus** DAQ. Three logical relays — `relay-1`, `relay-2`, `relay-3` — are created automatically on first startup, with current state and a full event history stored in SQLite (`relays` and `relay_events` tables).
+
+### Two controller modes
+
+| `RELAY_CONTROLLER` | Behavior | Where it works |
+| --- | --- | --- |
+| `mock` (default) | Logs the bit-mask write only, no hardware I/O. | Linux, macOS, Windows, Docker |
+| `mcc_usb1208fs_plus` | Drives the chosen DIO port via `mcculw`. | **Windows only** (requires MCC Universal Library + InstaCal) |
+
+The MCC controller uses a single output **byte latch**: every change is computed by masking the latch (`latch = (latch & ~mask) | new_bit`) and written with `d_out()` on the configured port. This means toggling one relay never disturbs the other bits on the same port. We avoid `d_bit_out()` because it is documented to misbehave on some MCC ports.
+
+### Wiring safety (READ THIS)
+
+The USB-1208FS-Plus digital outputs are **TTL-level I/O**. They must **not** drive relay coils directly. Use one of:
+
+- A relay board with **opto-isolated TTL inputs** (typical 5 V logic-level relay modules).
+- An external relay driver IC / transistor stage.
+- A solid-state relay (SSR) with a TTL-compatible control input.
+
+`FIRSTPORTB` lines on the USB-1208FS-Plus are documented as higher-current (24 mA) than other DIO lines, which is why it is the default in `MCC_DIGITAL_PORT`. Even so, treat the DIO outputs as logic-level signal lines, not coil drivers. Always confirm your relay board's input current and voltage requirements against the [USB-1208FS-Plus datasheet](https://www.mccdaq.com/) before wiring.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RELAY_CONTROLLER` | `mock` | `mock` or `mcc_usb1208fs_plus` |
+| `MCC_BOARD_NUM` | `0` | Board number configured in InstaCal |
+| `MCC_DIGITAL_PORT` | `FIRSTPORTB` | `mcculw.enums.DigitalPortType` name |
+| `RELAY_1_BIT` | `0` | Bit index on the port for relay-1 |
+| `RELAY_2_BIT` | `1` | Bit index on the port for relay-2 |
+| `RELAY_3_BIT` | `2` | Bit index on the port for relay-3 |
+| `RELAY_ACTIVE_HIGH` | `true` | Set `false` if your relay board is active-low |
+
+### Windows-native setup
+
+Docker on Windows talks to the Linux WSL kernel and **cannot** use `mcculw`. To control real relays, run the backend natively on Windows.
+
+1. **Install Python 3.12 (64-bit)** from <https://www.python.org/downloads/windows/>. Tick "Add python.exe to PATH" during install.
+2. **Install MCC DAQ Software** (includes Universal Library and InstaCal): <https://www.mccdaq.com/Software-Downloads>. Reboot if prompted.
+3. **Open InstaCal**, plug in the USB-1208FS-Plus, and confirm it is listed as **Board 0** (or whatever you set in `MCC_BOARD_NUM`). Click _Test_ → _Digital_ to confirm DIO works.
+4. **Clone the repo and create a venv** (PowerShell):
+
+   ```powershell
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
+   pip install -r requirements.txt
+   pip install -r requirements-windows.txt
+   ```
+
+   `requirements-windows.txt` installs `mcculw` and is intentionally **not** in the main `requirements.txt` so Linux/Docker installs do not break.
+5. **Configure environment** (PowerShell, current session only):
+
+   ```powershell
+   Copy-Item .env.example .env
+   $env:RELAY_CONTROLLER = "mcc_usb1208fs_plus"
+   $env:MCC_BOARD_NUM = "0"
+   $env:MCC_DIGITAL_PORT = "FIRSTPORTB"
+   $env:RELAY_1_BIT = "0"
+   $env:RELAY_2_BIT = "1"
+   $env:RELAY_3_BIT = "2"
+   $env:RELAY_ACTIVE_HIGH = "true"
+   $env:ADMIN_USERNAME = "admin"
+   $env:ADMIN_PASSWORD = "change-me-now"
+   ```
+
+   Or edit `.env` and set `RELAY_CONTROLLER=mcc_usb1208fs_plus`.
+6. **Run the server**:
+
+   ```powershell
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
+
+   On startup the backend will configure the chosen port for output and force all three relays to OFF.
+
+### CLI control with curl
+
+```bash
+# Public read-only relay status (no auth required)
+curl http://localhost:8000/api/public/relays
+
+# Admin: list relays
+curl -u admin:change-me-now http://localhost:8000/api/relays
+
+# Admin: get one relay
+curl -u admin:change-me-now http://localhost:8000/api/relays/relay-1
+
+# Admin: turn relays on/off
+curl -u admin:change-me-now -X POST http://localhost:8000/api/relays/relay-1/on
+curl -u admin:change-me-now -X POST http://localhost:8000/api/relays/relay-2/off
+
+# Admin: explicit set (JSON body)
+curl -u admin:change-me-now -X POST http://localhost:8000/api/relays/relay-3/set \
+     -H "Content-Type: application/json" -d '{"on": true}'
+
+# Admin: toggle
+curl -u admin:change-me-now -X POST http://localhost:8000/api/relays/relay-1/toggle
+
+# Admin: history
+curl -u admin:change-me-now "http://localhost:8000/api/relays/relay-1/events?limit=50"
+curl -u admin:change-me-now "http://localhost:8000/api/relay-events?limit=200"
+```
+
+Same calls in PowerShell:
+
+```powershell
+$cred = "admin:change-me-now"
+$auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($cred))
+$headers = @{ Authorization = "Basic $auth" }
+
+Invoke-RestMethod -Headers $headers -Method Post http://localhost:8000/api/relays/relay-1/on
+Invoke-RestMethod -Headers $headers -Method Post http://localhost:8000/api/relays/relay-2/toggle
+Invoke-RestMethod -Headers $headers http://localhost:8000/api/relays
+```
+
+### Dashboards
+
+- The **public** dashboard (`/`, `/public`) shows the three relay states read-only.
+- The **sysadmin** dashboard (`/admin`) shows ON/OFF/Toggle buttons per relay and a "Relay history" tab.
+
+### Notes / quirks
+
+- `mcculw` is Windows-only and imported lazily; the backend imports cleanly and runs in `mock` mode on Linux/macOS/Docker even when `mcculw` is not installed.
+- If `mcculw` import or `d_config_port` fails at startup the app still boots, logs a warning, and relay writes will return a hardware error instead of crashing the server.
+- `RELAY_ACTIVE_HIGH=false` flips the on/off semantics for boards whose inputs are active-low.
+

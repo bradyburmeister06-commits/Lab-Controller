@@ -25,6 +25,16 @@ services:
       ARDUINO_2_PORT: /dev/ttyACM1
       ARDUINO_2_NAME: arduino-2
       ARDUINO_BAUDRATE: 9600
+      # Relay controller. mock is the only supported mode in Docker/Linux;
+      # mcc_usb1208fs_plus is Windows-native and requires the MCC Universal
+      # Library + InstaCal + mcculw on the host.
+      RELAY_CONTROLLER: mock
+      MCC_BOARD_NUM: "0"
+      MCC_DIGITAL_PORT: FIRSTPORTB
+      RELAY_1_BIT: "0"
+      RELAY_2_BIT: "1"
+      RELAY_3_BIT: "2"
+      RELAY_ACTIVE_HIGH: "true"
     # When running with real Arduinos, set SENSOR_SIMULATOR=false above
     # and uncomment the devices that match your host.
     # devices:

@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Machine, utcnow
+from app.db.models import Machine, Relay, utcnow
 from app.db.session import Base, engine
 
 
@@ -32,3 +32,27 @@ def ensure_default_machine(db: Session) -> Machine:
     db.commit()
     db.refresh(machine)
     return machine
+
+
+def ensure_default_relays(db: Session) -> list[Relay]:
+    settings = get_settings()
+    defaults = [
+        ("relay-1", "Relay 1", settings.relay_1_bit),
+        ("relay-2", "Relay 2", settings.relay_2_bit),
+        ("relay-3", "Relay 3", settings.relay_3_bit),
+    ]
+    relays: list[Relay] = []
+    for relay_id, name, bit in defaults:
+        relay = db.get(Relay, relay_id)
+        if relay is None:
+            relay = Relay(id=relay_id, name=name, bit_index=bit, is_on=False)
+            db.add(relay)
+        else:
+            # Keep bit_index in sync with current configuration.
+            if relay.bit_index != bit:
+                relay.bit_index = bit
+        relays.append(relay)
+    db.commit()
+    for relay in relays:
+        db.refresh(relay)
+    return relays

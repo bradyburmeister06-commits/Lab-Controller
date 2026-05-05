@@ -188,6 +188,11 @@
         </div>
       </section>
 
+      <section class="card">
+        <h2>Relay states</h2>
+        <div class="sensor-list" id="relayList"><p>Loading relay states...</p></div>
+      </section>
+
       <footer id="updatedAt">Last updated: never</footer>
     </main>
 
@@ -313,7 +318,29 @@
         document.getElementById("updatedAt").textContent = `Last updated: ${new Date().toLocaleString()}`;
 
         renderSensors(dashboard.room);
+        renderRelays(dashboard.relays || []);
         renderChart(readings);
+      }
+
+      function renderRelays(relays) {
+        const target = document.getElementById("relayList");
+        if (!relays.length) {
+          target.innerHTML = "<p>No relays configured.</p>";
+          return;
+        }
+        target.innerHTML = relays
+          .map(
+            (r) => `
+              <div class="sensor-row">
+                <div>
+                  <strong>${r.name}</strong>
+                  <div class="metric-sub">${r.id} · bit ${r.bit_index}</div>
+                </div>
+                <div><strong style="color:${r.is_on ? "var(--success)" : "var(--muted)"}">${r.is_on ? "ON" : "OFF"}</strong></div>
+              </div>
+            `,
+          )
+          .join("");
       }
 
       refresh().catch((error) => {

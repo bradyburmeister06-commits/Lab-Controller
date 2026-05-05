@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.config import get_settings
-from app.db.models import ActivationEvent, Machine, SensorReading, SystemLog
+from app.db.models import ActivationEvent, Machine, Relay, RelayEvent, SensorReading, SystemLog
 from app.db.session import get_db
 from app.schemas import (
     ActivationEventOut,
@@ -18,6 +18,9 @@ from app.schemas import (
     MachineOut,
     MachineUpdate,
     ManualTriggerOut,
+    RelayEventOut,
+    RelayOut,
+    RelaySetIn,
     RoomSummaryOut,
     SensorLatestOut,
     SensorReadingOut,
@@ -26,6 +29,7 @@ from app.schemas import (
 )
 from app.services.machine_controller import build_controller
 from app.services.machine_service import get_last_activation, get_machine, reschedule_machine, seconds_until, trigger_machine
+from app.services.relay_service import apply_state, list_relays, relay_history, toggle_relay
 from app.services.sensor_service import latest_by_sensor, recent_readings
 
 router = APIRouter()
@@ -40,6 +44,33 @@ def serialize_machine(machine: Machine) -> MachineOut:
         activation_duration_seconds=machine.activation_duration_seconds,
         next_run_at=machine.next_run_at,
     )
+
+
+def serialize_relay(relay: Relay) -> RelayOut:
+    return RelayOut(
+        id=relay.id,
+        name=relay.name,
+        bit_index=relay.bit_index,
+        is_on=relay.is_on,
+        last_changed_at=relay.last_changed_at,
+    )
+
+
+def serialize_relay_event(event: RelayEvent) -> RelayEventOut:
+    return RelayEventOut(
+        id=event.id,
+        relay_id=event.relay_id,
+        state=event.state,
+        action=event.action,
+        trigger_source=event.trigger_source,
+        success=event.success,
+        message=event.message,
+        created_at=event.created_at,
+    )
+
+
+def public_relay_list(db: Session) -> list[RelayOut]:
+    return [serialize_relay(r) for r in list_relays(db)]
 
 
 def serialize_activation(event: ActivationEvent | None) -> ActivationEventOut | None:
@@ -102,6 +133,7 @@ def dashboard_payload(db: Session) -> DashboardStatusOut:
         next_run_at=machine.next_run_at,
         seconds_until_next_run=seconds_until(machine.next_run_at),
         room=room_summary(db),
+        relays=public_relay_list(db),
     )
 
 
@@ -256,4 +288,102 @@ def data_summary(_: str = Depends(require_admin), db: Session = Depends(get_db))
         activation_events=db.scalar(select(func.count()).select_from(ActivationEvent)) or 0,
         sensor_readings=db.scalar(select(func.count()).select_from(SensorReading)) or 0,
         system_logs=db.scalar(select(func.count()).select_from(SystemLog)) or 0,
+        relays=db.scalar(select(func.count()).select_from(Relay)) or 0,
+        relay_events=db.scalar(select(func.count()).select_from(RelayEvent)) or 0,
     )
+
+
+@router.get("/public/relays", response_model=list[RelayOut])
+def public_relays(db: Session = Depends(get_db)) -> list[RelayOut]:
+    return public_relay_list(db)
+
+
+@router.get("/relays", response_model=list[RelayOut])
+def admin_list_relays(_: str = Depends(require_admin), db: Session = Depends(get_db)) -> list[RelayOut]:
+    return public_relay_list(db)
+
+
+@router.get("/relays/{relay_id}", response_model=RelayOut)
+def admin_get_relay(
+    relay_id: str,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    relay = db.get(Relay, relay_id)
+    if relay is None:
+        raise HTTPException(status_code=404, detail=f"Unknown relay_id: {relay_id}")
+    return serialize_relay(relay)
+
+
+@router.post("/relays/{relay_id}/set", response_model=RelayOut)
+def admin_set_relay(
+    relay_id: str,
+    payload: RelaySetIn,
+    request: Request,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    controller = getattr(request.app.state, "relay_controller", None)
+    if controller is None:
+        raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
+    try:
+        relay, _event = apply_state(db, relay_id, payload.on, controller, action="set", trigger_source="api")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_relay(relay)
+
+
+@router.post("/relays/{relay_id}/on", response_model=RelayOut)
+def admin_relay_on(
+    relay_id: str,
+    request: Request,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    return admin_set_relay(relay_id, RelaySetIn(on=True), request, _, db)
+
+
+@router.post("/relays/{relay_id}/off", response_model=RelayOut)
+def admin_relay_off(
+    relay_id: str,
+    request: Request,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    return admin_set_relay(relay_id, RelaySetIn(on=False), request, _, db)
+
+
+@router.post("/relays/{relay_id}/toggle", response_model=RelayOut)
+def admin_relay_toggle(
+    relay_id: str,
+    request: Request,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayOut:
+    controller = getattr(request.app.state, "relay_controller", None)
+    if controller is None:
+        raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
+    try:
+        relay, _event = toggle_relay(db, relay_id, controller, trigger_source="api")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_relay(relay)
+
+
+@router.get("/relays/{relay_id}/events", response_model=list[RelayEventOut])
+def admin_relay_events(
+    relay_id: str,
+    limit: int = Query(default=200, ge=1, le=5000),
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[RelayEventOut]:
+    return [serialize_relay_event(e) for e in relay_history(db, relay_id=relay_id, limit=limit)]
+
+
+@router.get("/relay-events", response_model=list[RelayEventOut])
+def admin_all_relay_events(
+    limit: int = Query(default=500, ge=1, le=10000),
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[RelayEventOut]:
+    return [serialize_relay_event(e) for e in relay_history(db, relay_id=None, limit=limit)]

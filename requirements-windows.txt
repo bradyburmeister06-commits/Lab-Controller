@@ -1,0 +1,5 @@
+# Windows-only optional dependencies for hardware relay control.
+# Install AFTER installing MCC DAQ Software / Universal Library / InstaCal:
+#   py -m pip install -r requirements-windows.txt
+# Pinned to a known-good range; bump as needed.
+mcculw>=1.0.0

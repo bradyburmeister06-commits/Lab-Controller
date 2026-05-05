@@ -34,9 +34,25 @@ class Settings(BaseSettings):
     arduino_baudrate: int = 9600
     sensor_read_timeout_seconds: float = 2.0
 
+    relay_controller: Literal["mock", "mcc_usb1208fs_plus"] = "mock"
+    mcc_board_num: int = 0
+    mcc_digital_port: str = "FIRSTPORTB"
+    relay_1_bit: int = Field(default=0, ge=0, le=7)
+    relay_2_bit: int = Field(default=1, ge=0, le=7)
+    relay_3_bit: int = Field(default=2, ge=0, le=7)
+    relay_active_high: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def relay_bit_map(self) -> dict[str, int]:
+        return {
+            "relay-1": self.relay_1_bit,
+            "relay-2": self.relay_2_bit,
+            "relay-3": self.relay_3_bit,
+        }
 
 
 @lru_cache

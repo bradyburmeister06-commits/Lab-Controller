@@ -258,10 +258,16 @@
       </section>
 
       <section class="card">
+        <h2>Relays</h2>
+        <div id="relayCards" class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));"></div>
+      </section>
+
+      <section class="card">
         <div class="tabs">
           <button class="tab active" data-tab="readings">Sensor readings</button>
           <button class="tab" data-tab="activations">Activations</button>
           <button class="tab" data-tab="machines">Machines</button>
+          <button class="tab" data-tab="relays">Relay history</button>
           <button class="tab" data-tab="logs">Logs</button>
           <button class="tab" data-tab="summary">Database summary</button>
         </div>
@@ -269,6 +275,7 @@
         <div id="tab-readings" class="table-wrap"></div>
         <div id="tab-activations" class="table-wrap hidden"></div>
         <div id="tab-machines" class="table-wrap hidden"></div>
+        <div id="tab-relays" class="table-wrap hidden"></div>
         <div id="tab-logs" class="table-wrap hidden"></div>
         <div id="tab-summary" class="table-wrap hidden"></div>
       </section>
@@ -402,14 +409,65 @@
         });
       }
 
+      async function postJson(path) {
+        const response = await fetch(api(path), { method: "POST" });
+        if (!response.ok) throw new Error(`${path} failed with ${response.status}`);
+        return response.json();
+      }
+
+      function renderRelayCards(relays) {
+        const target = document.getElementById("relayCards");
+        if (!relays.length) {
+          target.innerHTML = "<p>No relays configured.</p>";
+          return;
+        }
+        target.innerHTML = relays
+          .map(
+            (r) => `
+              <div class="card" style="box-shadow:none;">
+                <div class="metric-label">${r.name} (${r.id} · bit ${r.bit_index})</div>
+                <div class="metric-value" style="color:${r.is_on ? "var(--success)" : "var(--muted)"}">${r.is_on ? "ON" : "OFF"}</div>
+                <div class="metric-sub">Last changed ${fmtDate(r.last_changed_at)}</div>
+                <div class="actions" style="margin-top:10px;">
+                  <button type="button" data-relay-on="${r.id}">ON</button>
+                  <button type="button" class="secondary" data-relay-off="${r.id}">OFF</button>
+                  <button type="button" class="secondary" data-relay-toggle="${r.id}">Toggle</button>
+                </div>
+              </div>
+            `,
+          )
+          .join("");
+
+        target.querySelectorAll("[data-relay-on]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            await postJson(`/api/relays/${btn.dataset.relayOn}/on`);
+            await refreshAll();
+          }),
+        );
+        target.querySelectorAll("[data-relay-off]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            await postJson(`/api/relays/${btn.dataset.relayOff}/off`);
+            await refreshAll();
+          }),
+        );
+        target.querySelectorAll("[data-relay-toggle]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            await postJson(`/api/relays/${btn.dataset.relayToggle}/toggle`);
+            await refreshAll();
+          }),
+        );
+      }
+
       async function refreshAll() {
         const hours = document.getElementById("historyWindow").value;
-        const [health, dashboard, readings, activations, machines, logs, summary] = await Promise.all([
+        const [health, dashboard, readings, activations, machines, relays, relayEvents, logs, summary] = await Promise.all([
           getJson("/api/health"),
           getJson("/api/dashboard"),
           getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
           getJson("/api/activations?limit=1000"),
           getJson("/api/machines"),
+          getJson("/api/relays"),
+          getJson("/api/relay-events?limit=500"),
           getJson("/api/logs?limit=1000"),
           getJson("/api/data/summary"),
         ]);
@@ -455,6 +513,18 @@
           { key: "activation_duration_seconds", label: "Activation seconds" },
           { key: "next_run_at", label: "Next run", format: fmtDate },
         ], machines);
+
+        renderRelayCards(relays);
+
+        renderTable("tab-relays", [
+          { key: "created_at", label: "Time", format: fmtDate },
+          { key: "relay_id", label: "Relay" },
+          { key: "action", label: "Action" },
+          { key: "state", label: "State", format: (v) => (v ? "ON" : "OFF") },
+          { key: "trigger_source", label: "Trigger" },
+          { key: "success", label: "OK", format: (v) => (v ? "yes" : "no") },
+          { key: "message", label: "Message" },
+        ], relayEvents);
 
         renderTable("tab-logs", [
           { key: "created_at", label: "Created", format: fmtDate },

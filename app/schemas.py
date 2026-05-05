@@ -53,12 +53,36 @@ class RoomSummaryOut(BaseModel):
     sensor_count: int
 
 
+class RelayOut(BaseModel):
+    id: str
+    name: str
+    bit_index: int
+    is_on: bool
+    last_changed_at: datetime | None
+
+
+class RelaySetIn(BaseModel):
+    on: bool
+
+
+class RelayEventOut(BaseModel):
+    id: int
+    relay_id: str
+    state: bool
+    action: str
+    trigger_source: str
+    success: bool
+    message: str | None
+    created_at: datetime
+
+
 class DashboardStatusOut(BaseModel):
     machine: MachineOut
     last_activation: ActivationEventOut | None
     next_run_at: datetime | None
     seconds_until_next_run: int | None
     room: RoomSummaryOut
+    relays: list[RelayOut] = Field(default_factory=list)
 
 
 class ManualTriggerOut(BaseModel):
@@ -84,3 +108,5 @@ class DataSummaryOut(BaseModel):
     activation_events: int
     sensor_readings: int
     system_logs: int
+    relays: int = 0
+    relay_events: int = 0
