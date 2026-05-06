@@ -318,28 +318,42 @@
         document.getElementById("updatedAt").textContent = `Last updated: ${new Date().toLocaleString()}`;
 
         renderSensors(dashboard.room);
-        renderRelays(dashboard.relays || []);
+        renderRelays(dashboard.relays || [], dashboard.relay_schedules || []);
         renderChart(readings);
       }
 
-      function renderRelays(relays) {
+      function fmtRelayDate(value) {
+        if (!value) return "—";
+        return new Date(value).toLocaleString();
+      }
+
+      function renderRelays(relays, schedules) {
         const target = document.getElementById("relayList");
         if (!relays.length) {
           target.innerHTML = "<p>No relays configured.</p>";
           return;
         }
+        const scheduleMap = {};
+        (schedules || []).forEach((s) => {
+          scheduleMap[s.relay_id] = s;
+        });
         target.innerHTML = relays
-          .map(
-            (r) => `
+          .map((r) => {
+            const s = scheduleMap[r.id];
+            const schedSummary = s && s.enabled
+              ? `sched ON ${s.on_duration_seconds}s / OFF ${s.off_duration_seconds}s · phase ${s.current_phase} · next ${fmtRelayDate(s.next_run_at)}`
+              : "schedule disabled";
+            return `
               <div class="sensor-row">
                 <div>
                   <strong>${r.name}</strong>
                   <div class="metric-sub">${r.id} · bit ${r.bit_index}</div>
+                  <div class="metric-sub">${schedSummary}</div>
                 </div>
                 <div><strong style="color:${r.is_on ? "var(--success)" : "var(--muted)"}">${r.is_on ? "ON" : "OFF"}</strong></div>
               </div>
-            `,
-          )
+            `;
+          })
           .join("");
       }
 

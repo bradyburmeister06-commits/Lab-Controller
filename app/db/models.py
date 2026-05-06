@@ -98,6 +98,21 @@ class RelayEvent(Base):
     relay: Mapped[Relay] = relationship(back_populates="events")
 
 
+class RelaySchedule(Base):
+    __tablename__ = "relay_schedules"
+
+    relay_id: Mapped[str] = mapped_column(ForeignKey("relays.id"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    on_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    off_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_phase: Mapped[str] = mapped_column(String(8), default="off", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 Index("ix_sensor_readings_sensor_time", SensorReading.sensor_name, SensorReading.recorded_at)
 Index("ix_sensor_readings_time", SensorReading.recorded_at)
 Index("ix_activation_events_machine_time", ActivationEvent.machine_id, ActivationEvent.started_at)

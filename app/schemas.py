@@ -75,6 +75,22 @@ class RelayUpdate(BaseModel):
     display_order: int | None = Field(default=None, ge=0, le=999)
 
 
+class RelayScheduleOut(BaseModel):
+    relay_id: str
+    enabled: bool
+    on_duration_seconds: int
+    off_duration_seconds: int
+    next_run_at: datetime | None
+    current_phase: str
+    updated_at: datetime | None = None
+
+
+class RelayScheduleUpdate(BaseModel):
+    enabled: bool | None = None
+    on_duration_seconds: int | None = Field(default=None, ge=1, le=86400)
+    off_duration_seconds: int | None = Field(default=None, ge=1, le=86400)
+
+
 class RelayControllerInfoOut(BaseModel):
     mode: str
     active_high: bool
@@ -103,6 +119,7 @@ class DashboardStatusOut(BaseModel):
     seconds_until_next_run: int | None
     room: RoomSummaryOut
     relays: list[RelayOut] = Field(default_factory=list)
+    relay_schedules: list[RelayScheduleOut] = Field(default_factory=list)
 
 
 class ManualTriggerOut(BaseModel):

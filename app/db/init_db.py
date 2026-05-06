@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Machine, Relay, utcnow
+from app.db.models import Machine, Relay, RelaySchedule, utcnow
 from app.db.session import Base, engine
 
 
@@ -56,6 +56,29 @@ def ensure_default_machine(db: Session) -> Machine:
     db.commit()
     db.refresh(machine)
     return machine
+
+
+def ensure_default_relay_schedules(db: Session) -> list[RelaySchedule]:
+    """Ensure each existing relay has a schedule row. New schedules default to disabled."""
+    schedules: list[RelaySchedule] = []
+    relays = db.query(Relay).all()
+    for relay in relays:
+        sched = db.get(RelaySchedule, relay.id)
+        if sched is None:
+            sched = RelaySchedule(
+                relay_id=relay.id,
+                enabled=False,
+                on_duration_seconds=60,
+                off_duration_seconds=60,
+                next_run_at=None,
+                current_phase="off",
+            )
+            db.add(sched)
+        schedules.append(sched)
+    db.commit()
+    for sched in schedules:
+        db.refresh(sched)
+    return schedules
 
 
 def ensure_default_relays(db: Session) -> list[Relay]:

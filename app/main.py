@@ -9,10 +9,16 @@ from fastapi.responses import FileResponse
 from app.api.routes import router
 from app.auth import require_admin
 from app.config import get_settings
-from app.db.init_db import ensure_default_machine, ensure_default_relays, init_db
+from app.db.init_db import (
+    ensure_default_machine,
+    ensure_default_relay_schedules,
+    ensure_default_relays,
+    init_db,
+)
 from app.db.session import SessionLocal
 from app.services.machine_controller import build_controller
 from app.services.relay_controller import build_relay_controller
+from app.services.relay_scheduler import RelayScheduler
 from app.services.scheduler import MachineScheduler
 from app.services.sensor_service import SensorDevice, SensorIngestionManager
 
@@ -21,6 +27,7 @@ settings = get_settings()
 controller = build_controller(settings)
 relay_controller = build_relay_controller(settings)
 machine_scheduler = MachineScheduler(settings, controller)
+relay_scheduler = RelayScheduler(relay_controller)
 sensor_manager = SensorIngestionManager(
     devices=[
         SensorDevice(settings.arduino_1_name, settings.arduino_1_port),
@@ -38,6 +45,7 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         ensure_default_machine(db)
         ensure_default_relays(db)
+        ensure_default_relay_schedules(db)
     try:
         relay_controller.initialize()
     except Exception as exc:
@@ -48,10 +56,13 @@ async def lifespan(app: FastAPI):
     app.state.machine_scheduler = machine_scheduler
     app.state.sensor_manager = sensor_manager
     app.state.relay_controller = relay_controller
+    app.state.relay_scheduler = relay_scheduler
     machine_scheduler.start()
+    relay_scheduler.start()
     sensor_manager.start()
     yield
     sensor_manager.stop()
+    relay_scheduler.stop()
     machine_scheduler.stop()
 
 

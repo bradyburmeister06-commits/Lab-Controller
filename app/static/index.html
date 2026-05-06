@@ -618,13 +618,17 @@
         `;
       }
 
-      function renderRelayCards(relays, info) {
+      function renderRelayCards(relays, info, schedules) {
         const target = document.getElementById("relayCards");
         if (!relays.length) {
           target.innerHTML = "<p>No relays configured.</p>";
           return;
         }
         const bitMap = (info && info.bit_map) || {};
+        const scheduleMap = {};
+        (schedules || []).forEach((s) => {
+          scheduleMap[s.relay_id] = s;
+        });
         target.innerHTML = relays
           .map((r) => {
             const wiringBit = bitMap[r.id] !== undefined ? bitMap[r.id] : r.bit_index;
@@ -669,6 +673,32 @@
                     </div>
                   </form>
                 </details>
+                ${(() => {
+                  const s = scheduleMap[r.id] || { enabled: false, on_duration_seconds: 60, off_duration_seconds: 60, next_run_at: null, current_phase: "off" };
+                  return `
+                  <details data-relay-schedule-block="${escapeHtml(r.id)}" open>
+                    <summary style="cursor:pointer;color:var(--muted);font-size:13px;">Independent schedule</summary>
+                    <div class="meta" data-relay-schedule-info="${escapeHtml(r.id)}">
+                      <span>Schedule</span><strong>${s.enabled ? "running" : "off"}</strong>
+                      <span>Phase</span><strong>${escapeHtml(s.current_phase || "off")}</strong>
+                      <span>Next flip</span><strong>${escapeHtml(fmtDate(s.next_run_at))}</strong>
+                    </div>
+                    <form class="relay-form" data-relay-schedule-form="${escapeHtml(r.id)}" style="margin-top:10px;">
+                      <label>ON duration (s)<input name="on_duration_seconds" type="number" min="1" max="86400" value="${Number(s.on_duration_seconds || 60)}" required /></label>
+                      <label>OFF duration (s)<input name="off_duration_seconds" type="number" min="1" max="86400" value="${Number(s.off_duration_seconds || 60)}" required /></label>
+                      <label>Schedule
+                        <select name="enabled">
+                          <option value="true" ${s.enabled ? "selected" : ""}>Enabled</option>
+                          <option value="false" ${!s.enabled ? "selected" : ""}>Disabled</option>
+                        </select>
+                      </label>
+                      <div class="actions full" style="margin-top:0;">
+                        <button type="submit">Save schedule</button>
+                      </div>
+                    </form>
+                  </details>
+                `;
+                })()}
               </div>
             `;
           })
@@ -716,11 +746,24 @@
             await wrapAction(`Save metadata for ${relayId}`, () => patchJson(`/api/relays/${relayId}`, body));
           }),
         );
+        target.querySelectorAll("[data-relay-schedule-form]").forEach((form) =>
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const relayId = form.dataset.relayScheduleForm;
+            const fd = new FormData(form);
+            const body = {
+              enabled: fd.get("enabled") === "true",
+              on_duration_seconds: Number(fd.get("on_duration_seconds")),
+              off_duration_seconds: Number(fd.get("off_duration_seconds")),
+            };
+            await wrapAction(`Save schedule for ${relayId}`, () => patchJson(`/api/relays/${relayId}/schedule`, body));
+          }),
+        );
       }
 
       async function refreshAll() {
         const hours = document.getElementById("historyWindow").value;
-        const [health, dashboard, readings, activations, machines, relays, relayController, relayEvents, logs, summary] = await Promise.all([
+        const [health, dashboard, readings, activations, machines, relays, relayController, relaySchedules, relayEvents, logs, summary] = await Promise.all([
           getJson("/api/health"),
           getJson("/api/dashboard"),
           getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
@@ -730,6 +773,10 @@
           getJson("/api/relays-controller").catch((err) => {
             console.warn("Could not load relay controller info", err);
             return null;
+          }),
+          getJson("/api/relay-schedules").catch((err) => {
+            console.warn("Could not load relay schedules", err);
+            return [];
           }),
           getJson("/api/relay-events?limit=500"),
           getJson("/api/logs?limit=1000"),
@@ -779,7 +826,7 @@
         ], machines);
 
         renderRelayControllerInfo(relayController);
-        renderRelayCards(relays, relayController);
+        renderRelayCards(relays, relayController, relaySchedules);
 
         renderTable("tab-relays", [
           { key: "created_at", label: "Time", format: fmtDate },

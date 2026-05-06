@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.config import get_settings
-from app.db.models import ActivationEvent, Machine, Relay, RelayEvent, SensorReading, SystemLog
+from app.db.models import ActivationEvent, Machine, Relay, RelayEvent, RelaySchedule, SensorReading, SystemLog
 from app.db.session import get_db
 from app.schemas import (
     ActivationEventOut,
@@ -21,6 +21,8 @@ from app.schemas import (
     RelayControllerInfoOut,
     RelayEventOut,
     RelayOut,
+    RelayScheduleOut,
+    RelayScheduleUpdate,
     RelaySetIn,
     RelayUpdate,
     RoomSummaryOut,
@@ -76,6 +78,23 @@ def serialize_relay_event(event: RelayEvent) -> RelayEventOut:
 
 def public_relay_list(db: Session) -> list[RelayOut]:
     return [serialize_relay(r) for r in list_relays(db)]
+
+
+def serialize_relay_schedule(sched: RelaySchedule) -> RelayScheduleOut:
+    return RelayScheduleOut(
+        relay_id=sched.relay_id,
+        enabled=sched.enabled,
+        on_duration_seconds=sched.on_duration_seconds,
+        off_duration_seconds=sched.off_duration_seconds,
+        next_run_at=sched.next_run_at,
+        current_phase=sched.current_phase,
+        updated_at=sched.updated_at,
+    )
+
+
+def list_relay_schedules(db: Session) -> list[RelayScheduleOut]:
+    rows = db.execute(select(RelaySchedule).order_by(RelaySchedule.relay_id)).scalars()
+    return [serialize_relay_schedule(s) for s in rows]
 
 
 def serialize_activation(event: ActivationEvent | None) -> ActivationEventOut | None:
@@ -139,6 +158,7 @@ def dashboard_payload(db: Session) -> DashboardStatusOut:
         seconds_until_next_run=seconds_until(machine.next_run_at),
         room=room_summary(db),
         relays=public_relay_list(db),
+        relay_schedules=list_relay_schedules(db),
     )
 
 
@@ -416,6 +436,84 @@ def admin_update_relay(
     db.commit()
     db.refresh(relay)
     return serialize_relay(relay)
+
+
+@router.get("/relay-schedules", response_model=list[RelayScheduleOut])
+def admin_list_relay_schedules(
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[RelayScheduleOut]:
+    return list_relay_schedules(db)
+
+
+@router.get("/relays/{relay_id}/schedule", response_model=RelayScheduleOut)
+def admin_get_relay_schedule(
+    relay_id: str,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayScheduleOut:
+    if db.get(Relay, relay_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown relay_id: {relay_id}")
+    sched = db.get(RelaySchedule, relay_id)
+    if sched is None:
+        sched = RelaySchedule(
+            relay_id=relay_id,
+            enabled=False,
+            on_duration_seconds=60,
+            off_duration_seconds=60,
+            next_run_at=None,
+            current_phase="off",
+        )
+        db.add(sched)
+        db.commit()
+        db.refresh(sched)
+    return serialize_relay_schedule(sched)
+
+
+@router.patch("/relays/{relay_id}/schedule", response_model=RelayScheduleOut)
+def admin_update_relay_schedule(
+    relay_id: str,
+    payload: RelayScheduleUpdate,
+    request: Request,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RelayScheduleOut:
+    if db.get(Relay, relay_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown relay_id: {relay_id}")
+    sched = db.get(RelaySchedule, relay_id)
+    if sched is None:
+        sched = RelaySchedule(
+            relay_id=relay_id,
+            enabled=False,
+            on_duration_seconds=60,
+            off_duration_seconds=60,
+            current_phase="off",
+        )
+        db.add(sched)
+
+    if payload.on_duration_seconds is not None:
+        sched.on_duration_seconds = payload.on_duration_seconds
+    if payload.off_duration_seconds is not None:
+        sched.off_duration_seconds = payload.off_duration_seconds
+    if payload.enabled is not None:
+        sched.enabled = payload.enabled
+
+    db.commit()
+    db.refresh(sched)
+
+    scheduler = getattr(request.app.state, "relay_scheduler", None)
+    if scheduler is not None:
+        try:
+            applied = scheduler.apply_schedule_change(db, relay_id)
+            if applied is not None:
+                sched = applied
+        except Exception:  # pragma: no cover - defensive
+            import logging
+
+            logging.getLogger("app.relay_scheduler").exception(
+                "apply_schedule_change failed for %s", relay_id
+            )
+    return serialize_relay_schedule(sched)
 
 
 @router.get("/relays-controller", response_model=RelayControllerInfoOut)

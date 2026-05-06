@@ -580,6 +580,57 @@ View database row counts:
 curl -u "$ADMIN_USER:$ADMIN_PASS" http://localhost:8000/api/data/summary
 ```
 
+### Per-relay (SSR) independent schedules
+
+Each of the three SSRs/relays (`relay-1`, `relay-2`, `relay-3`) has its own
+independent ON/OFF cycle scheduler. While a schedule is enabled, the relay
+turns ON for `on_duration_seconds`, then OFF for `off_duration_seconds`,
+repeating on its own clock. Schedules are managed only from the protected
+sysadmin UI at `/admin` and the authenticated `/api/relays/{relay_id}/schedule`
+endpoints — the public `/public` dashboard can display the current state and
+next-flip time but cannot edit them.
+
+**Safety note:** Always test in mock mode first
+(`RELAY_CONTROLLER=mock`) and confirm the SSR wiring matches the configured
+`RELAY_*_BIT` mapping before flipping `RELAY_CONTROLLER=mcc_usb1208fs_plus`.
+Disabling a schedule forces the relay to OFF, which is the fail-safe state
+for most heater / pump / lamp loads driven by an SSR.
+
+List all schedules:
+
+```bash
+curl -u "$ADMIN_USER:$ADMIN_PASS" http://localhost:8000/api/relay-schedules
+```
+
+Get a single relay's schedule:
+
+```bash
+curl -u "$ADMIN_USER:$ADMIN_PASS" http://localhost:8000/api/relays/relay-1/schedule
+```
+
+Enable relay-1 to cycle 30s ON, 90s OFF (the change is applied immediately —
+no app restart needed):
+
+```bash
+curl -u "$ADMIN_USER:$ADMIN_PASS" \
+  -X PATCH http://localhost:8000/api/relays/relay-1/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"on_duration_seconds":30,"off_duration_seconds":90}'
+```
+
+Disable a relay's schedule (the relay is forced OFF as a safe state):
+
+```bash
+curl -u "$ADMIN_USER:$ADMIN_PASS" \
+  -X PATCH http://localhost:8000/api/relays/relay-2/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":false}'
+```
+
+Each schedule transition is recorded as a `RelayEvent` with
+`trigger_source="schedule"` and is visible in `/api/relays/{relay_id}/events`
+and in the admin dashboard's "Relay history" tab.
+
 ### Watch data live from the command line
 
 Linux/macOS/Git Bash:
