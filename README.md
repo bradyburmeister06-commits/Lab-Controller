@@ -1099,3 +1099,197 @@ curl -u admin:change-me-now http://localhost:8000/api/relays-controller
 - If `mcculw` import or `d_config_port` fails at startup the app still boots, logs a warning, and relay writes will return a hardware error instead of crashing the server.
 - `RELAY_ACTIVE_HIGH=false` flips the on/off semantics for boards whose inputs are active-low.
 
+## Two-computer (hub + collector) deployment over Tailscale
+
+The backend supports a split deployment so the public dashboard and the lab
+hardware can live on different computers. The home computer runs the **hub**
+(web service, SQLite DB, sysadmin UI). The lab Windows computer runs the
+**collector**, which talks to the local Arduino sensors and the MCC USB-1208FS-Plus
+relay board, then pushes data to the hub through Tailscale.
+
+```
++---------------------+                  +---------------------------+
+|  Home server (hub)  |  <-- HTTPS  --   |   Lab PC (Windows)        |
+|  APP_MODE=hub       |  via Tailscale   |   APP_MODE=collector      |
+|  Dashboards + DB    |                  |   Arduinos + MCC relays   |
++---------------------+                  +---------------------------+
+```
+
+Communication is one-way HTTP from the collector to the hub (push readings,
+poll for commands). You do **not** need to expose the lab computer to inbound
+traffic; only the hub needs to be reachable on its Tailscale IP/URL.
+
+### A. Home/server computer (hub)
+
+1. Install Tailscale and join your tailnet. Note the machine's Tailscale URL
+   or 100.x.y.z IP — call it `https://lab-hub.ts.net` for the rest of this guide.
+2. Clone this repo and copy `.env.example` to `.env`:
+
+   ```bash
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   cp .env.example .env
+   ```
+
+3. Edit `.env` so the hub serves dashboards but never tries to talk to local
+   hardware:
+
+   ```dotenv
+   APP_MODE=hub
+   DATABASE_URL=sqlite:///./data/machine_research.db
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=use-a-real-password
+   COLLECTOR_API_TOKEN=generate-a-long-random-secret
+   COLLECTOR_ID=collector-1
+   COLLECTOR_NAME="Lab Collector"
+   # Hub does not run the collector loop, so HUB_BASE_URL is irrelevant here.
+   # Keep MCC settings at defaults; hub mode never touches the MCC library.
+   ```
+
+4. Start the hub. Either run with Docker:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+   …or run directly with Python:
+
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
+
+5. Confirm the hub is reachable on Tailscale:
+
+   - Public dashboard: `https://lab-hub.ts.net/`
+   - Sysadmin dashboard: `https://lab-hub.ts.net/admin` (Basic Auth)
+   - Health check: `https://lab-hub.ts.net/api/health`
+
+### B. Lab Windows computer (collector)
+
+1. Install Tailscale on the Windows lab machine and join the same tailnet.
+2. Install Python 3.11+, MCC InstaCal, and clone the repo. From a `cmd.exe`
+   prompt:
+
+   ```bat
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   copy .env.example .env
+   python -m venv .venv
+   .venv\Scripts\activate
+   pip install -r requirements.txt
+   pip install -r requirements-windows.txt
+   ```
+
+3. Edit `.env` for collector mode (use the same `COLLECTOR_API_TOKEN` you
+   chose on the hub). Replace `lab-hub.ts.net` with your hub's actual
+   Tailscale name or `100.x.y.z` IP:
+
+   ```dotenv
+   APP_MODE=collector
+   HUB_BASE_URL=https://lab-hub.ts.net
+   COLLECTOR_API_TOKEN=generate-a-long-random-secret
+   COLLECTOR_ID=collector-1
+   COLLECTOR_NAME="Lab Collector"
+
+   # Hardware on the Windows lab machine
+   RELAY_CONTROLLER=mcc_usb1208fs_plus
+   MCC_BOARD_NUM=0
+   MCC_DIGITAL_PORT=FIRSTPORTB
+   RELAY_1_BIT=0
+   RELAY_2_BIT=1
+   RELAY_3_BIT=2
+   RELAY_ACTIVE_HIGH=true
+
+   # Arduinos (set SENSOR_SIMULATOR=false once the boards are wired)
+   SENSOR_SIMULATOR=false
+   ARDUINO_1_PORT=COM3
+   ARDUINO_1_NAME=arduino-1
+   ARDUINO_2_PORT=COM4
+   ARDUINO_2_NAME=arduino-2
+   ARDUINO_BAUDRATE=9600
+   ```
+
+4. The collector also stores a small local SQLite buffer used to track which
+   readings have been shipped. Make sure the working directory is writable.
+
+### C. Test connectivity from the Windows collector to the hub
+
+From a `cmd.exe` prompt on the Windows lab machine, before starting the
+collector loop:
+
+```bat
+:: Replace lab-hub.ts.net and the token with your real values.
+curl -i https://lab-hub.ts.net/api/health
+curl -i -H "X-Collector-Token: generate-a-long-random-secret" ^
+  -H "Content-Type: application/json" ^
+  -X POST https://lab-hub.ts.net/api/collector/heartbeat ^
+  -d "{\"collector_id\":\"collector-1\",\"name\":\"Lab Collector\",\"mode\":\"collector\"}"
+```
+
+Or PowerShell:
+
+```powershell
+Invoke-RestMethod https://lab-hub.ts.net/api/health
+Invoke-RestMethod -Method Post `
+  -Uri https://lab-hub.ts.net/api/collector/heartbeat `
+  -Headers @{ "X-Collector-Token" = "generate-a-long-random-secret" } `
+  -ContentType "application/json" `
+  -Body '{"collector_id":"collector-1","name":"Lab Collector","mode":"collector"}'
+```
+
+A `200 OK` response means Tailscale, the hub, and the shared token are all
+working. After this you should see the collector show up under
+**Collector status** on the hub's `/admin` page.
+
+### D. Run both processes
+
+- **Hub** (home computer): `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+  or `docker compose up -d`.
+- **Collector** (Windows lab computer):
+
+  ```bat
+  cd Lab-Controller
+  .venv\Scripts\activate
+  uvicorn app.main:app --host 127.0.0.1 --port 8001
+  ```
+
+  The collector itself is a regular FastAPI app — it serves a small health
+  endpoint and runs the background `CollectorAgent` thread which pushes data
+  to the hub on `COLLECTOR_PUSH_INTERVAL_SECONDS` and polls for commands /
+  schedules on `COLLECTOR_POLL_INTERVAL_SECONDS`. The collector's local
+  `/admin` and `/` pages are not used in split mode; do all your dashboard
+  work through the hub.
+
+  To run it as a Windows service, you can use NSSM:
+
+  ```bat
+  nssm install LabCollector "C:\path\to\Lab-Controller\.venv\Scripts\uvicorn.exe" ^
+    app.main:app --host 127.0.0.1 --port 8001
+  nssm set LabCollector AppDirectory C:\path\to\Lab-Controller
+  nssm start LabCollector
+  ```
+
+### E. Single-machine mode (default, unchanged)
+
+Leave `APP_MODE=all_in_one` (or omit it entirely). The single backend then
+runs dashboards, the SQLite DB, the sensor reader, and the relay controller
+on one host. This is the original behavior and is unchanged.
+
+### Troubleshooting
+
+- `401` from `/api/collector/*` endpoints means `COLLECTOR_API_TOKEN`
+  doesn't match between the hub and the collector. Re-set both `.env`
+  files and restart both processes.
+- The hub's `/admin` page shows "stale" if the collector hasn't sent a
+  heartbeat in the last 60 seconds. Check the collector's Tailscale
+  connection and look at the collector log for `collector loop error`
+  warnings.
+- The collector backs off exponentially (up to 60s) when the hub is
+  unreachable. On reconnect it ships any buffered sensor readings and
+  relay events that accumulated while offline.
+- Schedule edits made on the hub are pulled by the collector at the
+  next poll. Hub-side reads (e.g. `is_on`) reflect the last status the
+  collector pushed up.
+

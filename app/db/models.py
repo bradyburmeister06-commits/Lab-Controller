@@ -113,7 +113,42 @@ class RelaySchedule(Base):
     )
 
 
+class Collector(Base):
+    __tablename__ = "collectors"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    relay_controller_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    relay_controller_initialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class CollectorCommand(Base):
+    """Commands enqueued by the hub for a specific collector to apply to local hardware."""
+
+    __tablename__ = "collector_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    collector_id: Mapped[str] = mapped_column(ForeignKey("collectors.id"), nullable=False)
+    relay_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    command_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    result_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 Index("ix_sensor_readings_sensor_time", SensorReading.sensor_name, SensorReading.recorded_at)
 Index("ix_sensor_readings_time", SensorReading.recorded_at)
 Index("ix_activation_events_machine_time", ActivationEvent.machine_id, ActivationEvent.started_at)
 Index("ix_relay_events_relay_time", RelayEvent.relay_id, RelayEvent.created_at)
+Index("ix_collector_commands_collector_status", CollectorCommand.collector_id, CollectorCommand.status)

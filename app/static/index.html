@@ -402,6 +402,13 @@
       </section>
 
       <section class="card">
+        <h2>Collector status</h2>
+        <div id="collectorStatus" class="relay-controller-info">
+          <div class="note">Loading collector status...</div>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Relay Control</h2>
         <div id="relayControllerInfo" class="relay-controller-info">
           <div class="note">Loading relay controller status...</div>
@@ -761,9 +768,34 @@
         );
       }
 
+      function renderCollectorStatus(collectors) {
+        const target = document.getElementById("collectorStatus");
+        if (!collectors || !collectors.length) {
+          target.innerHTML = '<div class="note">No collectors registered yet. The first collector heartbeat will appear here.</div>';
+          return;
+        }
+        target.innerHTML = collectors
+          .map((c) => {
+            const label = c.online ? "online" : "stale";
+            const sinceLabel =
+              c.seconds_since_heartbeat === null || c.seconds_since_heartbeat === undefined
+                ? "never"
+                : `${c.seconds_since_heartbeat}s ago`;
+            return `
+              <div><strong>${escapeHtml(c.name || c.id)}</strong>Collector</div>
+              <div><strong>${escapeHtml(c.mode || "—")}</strong>Mode</div>
+              <div><strong>${escapeHtml(c.host || "—")}</strong>Host</div>
+              <div><strong>${escapeHtml(c.relay_controller_mode || "—")}</strong>Hardware</div>
+              <div><strong>${label}</strong>Status</div>
+              <div><strong>${escapeHtml(sinceLabel)}</strong>Last heartbeat</div>
+            `;
+          })
+          .join("");
+      }
+
       async function refreshAll() {
         const hours = document.getElementById("historyWindow").value;
-        const [health, dashboard, readings, activations, machines, relays, relayController, relaySchedules, relayEvents, logs, summary] = await Promise.all([
+        const [health, dashboard, readings, activations, machines, relays, relayController, relaySchedules, relayEvents, logs, summary, collectors] = await Promise.all([
           getJson("/api/health"),
           getJson("/api/dashboard"),
           getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
@@ -781,7 +813,12 @@
           getJson("/api/relay-events?limit=500"),
           getJson("/api/logs?limit=1000"),
           getJson("/api/data/summary"),
+          getJson("/api/collectors").catch((err) => {
+            console.warn("Could not load collectors", err);
+            return [];
+          }),
         ]);
+        renderCollectorStatus(collectors);
 
         currentMachineId = dashboard.machine.id;
         document.getElementById("healthStatus").textContent = `Backend ${health.status}, scheduler ${health.scheduler_running ? "running" : "stopped"}`;

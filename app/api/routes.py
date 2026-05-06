@@ -7,12 +7,29 @@ from sqlalchemy import desc, select
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import require_admin, require_collector_token
 from app.config import get_settings
-from app.db.models import ActivationEvent, Machine, Relay, RelayEvent, RelaySchedule, SensorReading, SystemLog
+from app.db.models import (
+    ActivationEvent,
+    Collector,
+    CollectorCommand,
+    Machine,
+    Relay,
+    RelayEvent,
+    RelaySchedule,
+    SensorReading,
+    SystemLog,
+)
 from app.db.session import get_db
 from app.schemas import (
     ActivationEventOut,
+    CollectorCommandAckIn,
+    CollectorCommandOut,
+    CollectorHeartbeatIn,
+    CollectorOut,
+    CollectorPollOut,
+    CollectorRelayBatchIn,
+    CollectorSensorBatchIn,
     DashboardStatusOut,
     HealthOut,
     MachineOut,
@@ -31,6 +48,7 @@ from app.schemas import (
     SystemLogOut,
     DataSummaryOut,
 )
+from app.services import collector_hub
 from app.services.machine_controller import build_controller
 from app.services.machine_service import get_last_activation, get_machine, reschedule_machine, seconds_until, trigger_machine
 from app.services.relay_service import apply_state, list_relays, relay_history, toggle_relay
@@ -340,6 +358,21 @@ def admin_get_relay(
     return serialize_relay(relay)
 
 
+def _enqueue_relay_set(db: Session, relay_id: str, on: bool) -> Relay:
+    settings = get_settings()
+    relay = db.get(Relay, relay_id)
+    if relay is None:
+        raise ValueError(f"Unknown relay_id: {relay_id}")
+    collector_hub.enqueue_command(
+        db,
+        collector_id=settings.collector_id,
+        command_type="relay_set",
+        relay_id=relay_id,
+        payload="on" if on else "off",
+    )
+    return relay
+
+
 @router.post("/relays/{relay_id}/set", response_model=RelayOut)
 def admin_set_relay(
     relay_id: str,
@@ -348,8 +381,15 @@ def admin_set_relay(
     _: str = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RelayOut:
+    settings = get_settings()
     controller = getattr(request.app.state, "relay_controller", None)
     if controller is None:
+        if settings.app_mode == "hub":
+            try:
+                relay = _enqueue_relay_set(db, relay_id, payload.on)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return serialize_relay(relay)
         raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
     try:
         relay, _event = apply_state(db, relay_id, payload.on, controller, action="set", trigger_source="api")
@@ -385,8 +425,20 @@ def admin_relay_toggle(
     _: str = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RelayOut:
+    settings = get_settings()
     controller = getattr(request.app.state, "relay_controller", None)
     if controller is None:
+        if settings.app_mode == "hub":
+            relay = db.get(Relay, relay_id)
+            if relay is None:
+                raise HTTPException(status_code=404, detail=f"Unknown relay_id: {relay_id}")
+            collector_hub.enqueue_command(
+                db,
+                collector_id=settings.collector_id,
+                command_type="relay_toggle",
+                relay_id=relay_id,
+            )
+            return serialize_relay(relay)
         raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
     try:
         relay, _event = toggle_relay(db, relay_id, controller, trigger_source="api")
@@ -501,6 +553,7 @@ def admin_update_relay_schedule(
     db.commit()
     db.refresh(sched)
 
+    settings = get_settings()
     scheduler = getattr(request.app.state, "relay_scheduler", None)
     if scheduler is not None:
         try:
@@ -513,6 +566,15 @@ def admin_update_relay_schedule(
             logging.getLogger("app.relay_scheduler").exception(
                 "apply_schedule_change failed for %s", relay_id
             )
+    elif settings.app_mode == "hub":
+        # In split mode the collector executes hardware changes; tell it to
+        # re-read schedules immediately.
+        collector_hub.enqueue_command(
+            db,
+            collector_id=settings.collector_id,
+            command_type="schedule_changed",
+            relay_id=relay_id,
+        )
     return serialize_relay_schedule(sched)
 
 
@@ -520,17 +582,26 @@ def admin_update_relay_schedule(
 def admin_relay_controller_info(
     request: Request,
     _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> RelayControllerInfoOut:
     settings = get_settings()
     controller = getattr(request.app.state, "relay_controller", None)
     initialized = False
     latch = 0
+    mode = settings.relay_controller
     if controller is not None:
         latch = int(getattr(controller, "latch", 0)) & 0xFF
         # Mock controllers have no _configured flag; treat as always ready.
         initialized = bool(getattr(controller, "_configured", True))
+    elif settings.app_mode == "hub":
+        # Surface the remote collector's last reported relay-controller status.
+        collector = db.get(Collector, settings.collector_id)
+        if collector is not None:
+            initialized = bool(collector.relay_controller_initialized)
+            if collector.relay_controller_mode:
+                mode = collector.relay_controller_mode
     return RelayControllerInfoOut(
-        mode=settings.relay_controller,
+        mode=mode,
         active_high=settings.relay_active_high,
         board_num=settings.mcc_board_num,
         digital_port=settings.mcc_digital_port,
@@ -538,3 +609,164 @@ def admin_relay_controller_info(
         initialized=initialized,
         latch=latch,
     )
+
+
+# --- Collector status (admin) and ingestion/poll (collector) endpoints ---
+
+
+def _serialize_collector(collector: Collector) -> CollectorOut:
+    return CollectorOut(
+        id=collector.id,
+        name=collector.name,
+        mode=collector.mode,
+        host=collector.host,
+        last_heartbeat_at=collector.last_heartbeat_at,
+        last_status_message=collector.last_status_message,
+        relay_controller_mode=collector.relay_controller_mode,
+        relay_controller_initialized=bool(collector.relay_controller_initialized),
+        online=collector_hub.collector_is_online(collector),
+        seconds_since_heartbeat=collector_hub.seconds_since_heartbeat(collector),
+    )
+
+
+@router.get("/collectors", response_model=list[CollectorOut])
+def admin_list_collectors(
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[CollectorOut]:
+    return [_serialize_collector(c) for c in collector_hub.list_collectors(db)]
+
+
+@router.get("/collectors/{collector_id}", response_model=CollectorOut)
+def admin_get_collector(
+    collector_id: str,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> CollectorOut:
+    collector = db.get(Collector, collector_id)
+    if collector is None:
+        raise HTTPException(status_code=404, detail=f"Unknown collector_id: {collector_id}")
+    return _serialize_collector(collector)
+
+
+@router.post("/collector/heartbeat", response_model=CollectorOut)
+def collector_heartbeat(
+    payload: CollectorHeartbeatIn,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> CollectorOut:
+    collector = collector_hub.upsert_collector(
+        db,
+        collector_id=payload.collector_id,
+        name=payload.name,
+        mode=payload.mode,
+        host=payload.host,
+        relay_controller_mode=payload.relay_controller_mode,
+        relay_controller_initialized=payload.relay_controller_initialized,
+        status_message=payload.status_message,
+    )
+    return _serialize_collector(collector)
+
+
+@router.post("/collector/sensor-readings")
+def collector_ingest_sensor_readings(
+    payload: CollectorSensorBatchIn,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> dict:
+    collector_hub.upsert_collector(db, collector_id=payload.collector_id)
+    inserted = 0
+    for reading in payload.readings:
+        kwargs = dict(
+            sensor_name=reading.sensor_name,
+            temperature=reading.temperature,
+            relative_humidity=reading.relative_humidity,
+            raw_payload=reading.raw_payload,
+        )
+        if reading.recorded_at is not None:
+            ts = reading.recorded_at
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+            kwargs["recorded_at"] = ts
+        db.add(SensorReading(**kwargs))
+        inserted += 1
+    db.commit()
+    return {"inserted": inserted}
+
+
+@router.post("/collector/relay-events")
+def collector_ingest_relay_events(
+    payload: CollectorRelayBatchIn,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> dict:
+    collector_hub.upsert_collector(db, collector_id=payload.collector_id)
+    inserted = 0
+    for evt in payload.events:
+        relay = db.get(Relay, evt.relay_id)
+        if relay is None:
+            continue
+        db.add(
+            RelayEvent(
+                relay_id=evt.relay_id,
+                state=evt.state,
+                action=evt.action,
+                trigger_source=evt.trigger_source or "collector",
+                success=evt.success,
+                message=evt.message,
+            )
+        )
+        inserted += 1
+    # Update relay states reported by collector
+    for relay_id, on in (payload.relay_states or {}).items():
+        relay = db.get(Relay, relay_id)
+        if relay is None:
+            continue
+        if relay.is_on != bool(on):
+            relay.is_on = bool(on)
+            from app.db.models import utcnow as _utcnow
+
+            relay.last_changed_at = _utcnow()
+    db.commit()
+    return {"inserted": inserted}
+
+
+@router.get("/collector/poll", response_model=CollectorPollOut)
+def collector_poll(
+    collector_id: str,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> CollectorPollOut:
+    collector_hub.upsert_collector(db, collector_id=collector_id)
+    relays = [serialize_relay(r) for r in list_relays(db)]
+    schedules = list_relay_schedules(db)
+    pending = collector_hub.fetch_pending_commands(db, collector_id)
+    commands = [
+        CollectorCommandOut(
+            id=c.id,
+            relay_id=c.relay_id,
+            command_type=c.command_type,
+            payload=c.payload,
+            created_at=c.created_at,
+        )
+        for c in pending
+    ]
+    return CollectorPollOut(relays=relays, relay_schedules=schedules, commands=commands)
+
+
+@router.post("/collector/command-ack")
+def collector_command_ack(
+    payload: CollectorCommandAckIn,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> dict:
+    cmd = collector_hub.acknowledge_command(
+        db,
+        collector_id=payload.collector_id,
+        command_id=payload.command_id,
+        success=payload.success,
+        message=payload.message,
+    )
+    if cmd is None:
+        raise HTTPException(status_code=404, detail="Unknown command for collector")
+    return {"id": cmd.id, "status": cmd.status}

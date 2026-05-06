@@ -17,6 +17,27 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "change-me-now"
 
+    # Deployment mode:
+    #   all_in_one  - single machine: dashboards + sensors + relays (default)
+    #   hub         - home/server: serves dashboards, stores data, ingests from collector
+    #   collector   - lab/Windows: drives Arduino + MCC hardware, pushes to hub via HTTP
+    app_mode: Literal["all_in_one", "hub", "collector"] = "all_in_one"
+
+    # Hub <-> collector shared secret. Required when running split deployment.
+    collector_api_token: str = "change-me-collector-token"
+
+    # Collector identity
+    collector_id: str = "collector-1"
+    collector_name: str = "Lab Collector"
+
+    # Hub URL the collector will push data to (e.g. Tailscale URL of the home server)
+    hub_base_url: str = "http://localhost:8000"
+
+    # Collector loop tuning
+    collector_push_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    collector_poll_interval_seconds: int = Field(default=5, ge=1, le=3600)
+    collector_request_timeout_seconds: float = 10.0
+
     default_machine_id: str = "machine-1"
     default_interval_seconds: int = Field(default=3600, ge=60)
     activation_duration_seconds: int = Field(default=5, ge=1)
@@ -53,6 +74,18 @@ class Settings(BaseSettings):
             "relay-2": self.relay_2_bit,
             "relay-3": self.relay_3_bit,
         }
+
+    @property
+    def is_hub(self) -> bool:
+        return self.app_mode in ("hub", "all_in_one")
+
+    @property
+    def is_collector(self) -> bool:
+        return self.app_mode in ("collector", "all_in_one")
+
+    @property
+    def runs_local_hardware(self) -> bool:
+        return self.app_mode in ("collector", "all_in_one")
 
 
 @lru_cache

@@ -147,3 +147,79 @@ class DataSummaryOut(BaseModel):
     system_logs: int
     relays: int = 0
     relay_events: int = 0
+
+
+# --- Collector / hub split-mode schemas ---
+
+
+class CollectorHeartbeatIn(BaseModel):
+    collector_id: str
+    name: str | None = None
+    mode: str | None = None
+    host: str | None = None
+    relay_controller_mode: str | None = None
+    relay_controller_initialized: bool | None = None
+    status_message: str | None = None
+
+
+class CollectorOut(BaseModel):
+    id: str
+    name: str
+    mode: str | None = None
+    host: str | None = None
+    last_heartbeat_at: datetime | None = None
+    last_status_message: str | None = None
+    relay_controller_mode: str | None = None
+    relay_controller_initialized: bool = False
+    online: bool = False
+    seconds_since_heartbeat: int | None = None
+
+
+class CollectorSensorReadingIn(BaseModel):
+    sensor_name: str
+    temperature: float
+    relative_humidity: float
+    recorded_at: datetime | None = None
+    raw_payload: str | None = None
+
+
+class CollectorSensorBatchIn(BaseModel):
+    collector_id: str
+    readings: list[CollectorSensorReadingIn] = Field(default_factory=list)
+
+
+class CollectorRelayEventIn(BaseModel):
+    relay_id: str
+    state: bool
+    action: str = "set"
+    trigger_source: str = "collector"
+    success: bool = True
+    message: str | None = None
+    occurred_at: datetime | None = None
+
+
+class CollectorRelayBatchIn(BaseModel):
+    collector_id: str
+    events: list[CollectorRelayEventIn] = Field(default_factory=list)
+    relay_states: dict[str, bool] = Field(default_factory=dict)
+
+
+class CollectorCommandOut(BaseModel):
+    id: int
+    relay_id: str | None = None
+    command_type: str
+    payload: str | None = None
+    created_at: datetime
+
+
+class CollectorPollOut(BaseModel):
+    relays: list[RelayOut]
+    relay_schedules: list[RelayScheduleOut]
+    commands: list[CollectorCommandOut] = Field(default_factory=list)
+
+
+class CollectorCommandAckIn(BaseModel):
+    collector_id: str
+    command_id: int
+    success: bool = True
+    message: str | None = None

@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Machine, Relay, RelaySchedule, utcnow
+from app.db.models import Collector, Machine, Relay, RelaySchedule, utcnow
 from app.db.session import Base, engine
 
 
@@ -79,6 +79,22 @@ def ensure_default_relay_schedules(db: Session) -> list[RelaySchedule]:
     for sched in schedules:
         db.refresh(sched)
     return schedules
+
+
+def ensure_default_collector(db: Session) -> Collector:
+    settings = get_settings()
+    collector = db.get(Collector, settings.collector_id)
+    if collector is None:
+        collector = Collector(
+            id=settings.collector_id,
+            name=settings.collector_name,
+            mode=settings.app_mode,
+            relay_controller_mode=settings.relay_controller,
+        )
+        db.add(collector)
+        db.commit()
+        db.refresh(collector)
+    return collector
 
 
 def ensure_default_relays(db: Session) -> list[Relay]:
