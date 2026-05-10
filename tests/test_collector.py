@@ -206,7 +206,7 @@ def test_collector_online_helpers():
     with SessionLocal() as db:
         c = db.get(Collector, "online-helper")
         if c is None:
-            c = Collector(id="online-helper", name="x")
+            c = Collector(id="online-helper", display_name="x")
             db.add(c)
         c.last_heartbeat_at = utcnow()
         db.commit()

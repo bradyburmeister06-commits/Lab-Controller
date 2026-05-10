@@ -189,6 +189,11 @@
       </section>
 
       <section class="card">
+        <h2>Connected collectors</h2>
+        <div class="sensor-list" id="collectorList"><p>Loading collectors...</p></div>
+      </section>
+
+      <section class="card">
         <h2>Relay states</h2>
         <div class="sensor-list" id="relayList"><p>Loading relay states...</p></div>
       </section>
@@ -302,6 +307,7 @@
           getJson("/api/public/dashboard"),
           getJson("/api/public/sensors/readings?hours=24&limit=5000"),
         ]);
+        renderCollectors(dashboard.collectors || [], dashboard.relay_schedules || []);
 
         document.getElementById("statusPill").textContent = dashboard.machine.enabled ? "Machine schedule enabled" : "Machine schedule disabled";
         document.getElementById("machineName").textContent = dashboard.machine.name;
@@ -325,6 +331,52 @@
       function fmtRelayDate(value) {
         if (!value) return "—";
         return new Date(value).toLocaleString();
+      }
+
+      function escapePublic(value) {
+        if (value === null || value === undefined) return "";
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function renderCollectors(collectors, schedules) {
+        const target = document.getElementById("collectorList");
+        if (!collectors || !collectors.length) {
+          target.innerHTML = "<p>No collectors connected yet.</p>";
+          return;
+        }
+        const schedByMachine = {};
+        (schedules || []).forEach((s) => {
+          if (!schedByMachine[s.machine_key]) schedByMachine[s.machine_key] = [];
+          schedByMachine[s.machine_key].push(s);
+        });
+        target.innerHTML = collectors
+          .map((c) => {
+            const sinceLabel =
+              c.seconds_since_heartbeat === null || c.seconds_since_heartbeat === undefined
+                ? "never"
+                : `${c.seconds_since_heartbeat}s ago`;
+            const status = c.online ? "online" : c.last_heartbeat_at ? "stale / offline" : "no heartbeat yet";
+            const machineKey = c.machine_key || c.id;
+            const sched = (schedByMachine[machineKey] || [])
+              .map((s) => `${escapePublic(s.relay_id)}: ${s.enabled ? `ON ${s.on_duration_seconds}s / OFF ${s.off_duration_seconds}s` : "off"}`)
+              .join(" · ");
+            return `
+              <div class="sensor-row">
+                <div>
+                  <strong>${escapePublic(c.display_name || c.name || c.id)}</strong>
+                  <div class="metric-sub">${escapePublic(machineKey)} · last heartbeat ${escapePublic(sinceLabel)}</div>
+                  <div class="metric-sub">${sched || "no schedules configured"}</div>
+                </div>
+                <div><strong>${escapePublic(status)}</strong></div>
+              </div>
+            `;
+          })
+          .join("");
       }
 
       function renderRelays(relays, schedules) {

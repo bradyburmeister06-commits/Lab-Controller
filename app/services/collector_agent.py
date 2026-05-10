@@ -50,6 +50,7 @@ class CollectorAgent:
         self._last_sensor_id = 0
         self._last_relay_event_id = 0
         self._consecutive_errors = 0
+        self._registered = False
 
     @property
     def running(self) -> bool:
@@ -72,8 +73,22 @@ class CollectorAgent:
 
     def _init_watermarks(self) -> None:
         with SessionLocal() as db:
-            last_s = db.execute(select(SensorReading.id).order_by(SensorReading.id.desc()).limit(1)).scalar()
-            last_e = db.execute(select(RelayEvent.id).order_by(RelayEvent.id.desc()).limit(1)).scalar()
+            last_s = db.execute(
+                select(SensorReading.id)
+                .where(SensorReading.machine_key == self.settings.collector_id)
+                .order_by(SensorReading.id.desc())
+                .limit(1)
+            ).scalar() or db.execute(
+                select(SensorReading.id).order_by(SensorReading.id.desc()).limit(1)
+            ).scalar()
+            last_e = db.execute(
+                select(RelayEvent.id)
+                .where(RelayEvent.machine_key == self.settings.collector_id)
+                .order_by(RelayEvent.id.desc())
+                .limit(1)
+            ).scalar() or db.execute(
+                select(RelayEvent.id).order_by(RelayEvent.id.desc()).limit(1)
+            ).scalar()
         self._last_sensor_id = int(last_s or 0)
         self._last_relay_event_id = int(last_e or 0)
 
@@ -92,6 +107,8 @@ class CollectorAgent:
         while not self._stop.is_set():
             now = utcnow()
             try:
+                if not self._registered:
+                    self._register_once()
                 if now >= next_push:
                     self._push_once()
                     next_push = utcnow() + timedelta(seconds=push_interval)
@@ -112,6 +129,26 @@ class CollectorAgent:
                 continue
             self._stop.wait(1)
 
+    def _register_once(self) -> None:
+        host = socket.gethostname()
+        with self._client() as client:
+            client.post(
+                "/api/collector/register",
+                json={
+                    "collector_id": self.settings.collector_id,
+                    "name": self.settings.collector_name,
+                    "display_name": self.settings.collector_name,
+                    "mode": self.settings.app_mode,
+                    "host": host,
+                    "hostname": host,
+                    "software_version": self.settings.software_version,
+                    "relay_controller_mode": self.settings.relay_controller,
+                    "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+                    "runtime_state": "starting",
+                },
+            ).raise_for_status()
+        self._registered = True
+
     def _push_once(self) -> None:
         host = socket.gethostname()
         with self._client() as client, SessionLocal() as db:
@@ -120,10 +157,14 @@ class CollectorAgent:
                 json={
                     "collector_id": self.settings.collector_id,
                     "name": self.settings.collector_name,
+                    "display_name": self.settings.collector_name,
                     "mode": self.settings.app_mode,
                     "host": host,
+                    "hostname": host,
+                    "software_version": self.settings.software_version,
                     "relay_controller_mode": self.settings.relay_controller,
                     "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+                    "runtime_state": "running",
                     "status_message": "ok",
                 },
             ).raise_for_status()
@@ -198,7 +239,11 @@ class CollectorAgent:
             data = r.json()
 
             # Sync schedule rows from hub into local DB so the local
-            # RelayScheduler executes the hub-owned configuration.
+            # RelayScheduler executes the hub-owned configuration. The hub
+            # already filters this list to schedules scoped to our
+            # collector_id, but we double-check defensively below — a
+            # collector must NEVER apply another machine's intervals to its
+            # own hardware.
             self._apply_schedules(data.get("relay_schedules") or [])
 
             for cmd in data.get("commands") or []:
@@ -219,17 +264,23 @@ class CollectorAgent:
     def _apply_schedules(self, hub_schedules: list[dict[str, Any]]) -> None:
         if not hub_schedules:
             return
+        my_key = self.settings.collector_id
         with SessionLocal() as db:
             for hs in hub_schedules:
+                # Defensive scoping: ignore any schedule row not scoped to us.
+                schedule_key = hs.get("machine_key")
+                if schedule_key is not None and schedule_key != my_key:
+                    continue
                 relay_id = hs.get("relay_id")
                 if not relay_id:
                     continue
                 if db.get(Relay, relay_id) is None:
                     continue
-                local = db.get(RelaySchedule, relay_id)
+                local = db.get(RelaySchedule, (my_key, relay_id))
                 changed = False
                 if local is None:
                     local = RelaySchedule(
+                        machine_key=my_key,
                         relay_id=relay_id,
                         enabled=bool(hs.get("enabled", False)),
                         on_duration_seconds=int(hs.get("on_duration_seconds", 60)),
@@ -252,7 +303,7 @@ class CollectorAgent:
                 if changed and self.scheduler is not None:
                     db.commit()
                     try:
-                        self.scheduler.apply_schedule_change(db, relay_id)
+                        self.scheduler.apply_schedule_change(db, relay_id, machine_key=my_key)
                     except Exception:  # pragma: no cover - defensive
                         logger.exception("apply_schedule_change failed for %s", relay_id)
             db.commit()
@@ -265,10 +316,17 @@ class CollectorAgent:
             with SessionLocal() as db:
                 if ctype == "relay_set" and relay_id:
                     on = (payload == "on")
-                    apply_state(db, relay_id, on, self.controller, action="set", trigger_source="hub")
+                    apply_state(
+                        db, relay_id, on, self.controller,
+                        action="set", trigger_source="hub",
+                        machine_key=self.settings.collector_id,
+                    )
                     return True, f"set {relay_id} {'on' if on else 'off'}"
                 if ctype == "relay_toggle" and relay_id:
-                    toggle_relay(db, relay_id, self.controller, trigger_source="hub")
+                    toggle_relay(
+                        db, relay_id, self.controller,
+                        trigger_source="hub", machine_key=self.settings.collector_id,
+                    )
                     return True, f"toggled {relay_id}"
                 if ctype == "schedule_changed":
                     # No-op here — schedules were already synced above.

@@ -34,7 +34,7 @@ controller = build_controller(settings)
 if settings.runs_local_hardware:
     relay_controller = build_relay_controller(settings)
     machine_scheduler = MachineScheduler(settings, controller)
-    relay_scheduler = RelayScheduler(relay_controller)
+    relay_scheduler = RelayScheduler(relay_controller, machine_key=settings.collector_id)
     sensor_manager = SensorIngestionManager(
         devices=[
             SensorDevice(settings.arduino_1_name, settings.arduino_1_port),
@@ -43,6 +43,7 @@ if settings.runs_local_hardware:
         baudrate=settings.arduino_baudrate,
         timeout_seconds=settings.sensor_read_timeout_seconds,
         simulator=settings.sensor_simulator,
+        machine_key=settings.collector_id,
     )
 else:
     relay_controller = None
@@ -66,8 +67,12 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         ensure_default_machine(db)
         ensure_default_relays(db)
-        ensure_default_relay_schedules(db)
-        ensure_default_collector(db)
+        # Only seed schedules + a local collector entry when this process
+        # actually owns hardware. A pure hub starts empty and only gets
+        # machines as collectors register.
+        if settings.runs_local_hardware:
+            ensure_default_relay_schedules(db, machine_key=settings.collector_id)
+            ensure_default_collector(db)
 
     if relay_controller is not None:
         try:

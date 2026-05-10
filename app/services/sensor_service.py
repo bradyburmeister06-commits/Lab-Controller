@@ -59,9 +59,17 @@ def validate_reading(temperature: float, relative_humidity: float) -> tuple[floa
     return temperature, relative_humidity
 
 
-def save_reading(db: Session, sensor_name: str, temperature: float, relative_humidity: float, raw_payload: str | None) -> SensorReading:
+def save_reading(
+    db: Session,
+    sensor_name: str,
+    temperature: float,
+    relative_humidity: float,
+    raw_payload: str | None,
+    machine_key: str | None = None,
+) -> SensorReading:
     reading = SensorReading(
         sensor_name=sensor_name,
+        machine_key=machine_key,
         temperature=temperature,
         relative_humidity=relative_humidity,
         raw_payload=raw_payload,
@@ -91,11 +99,19 @@ def latest_by_sensor(db: Session) -> list[SensorReading]:
     )
 
 
-def recent_readings(db: Session, sensor_name: str | None = None, hours: int = 24, limit: int = 1000) -> list[SensorReading]:
+def recent_readings(
+    db: Session,
+    sensor_name: str | None = None,
+    hours: int = 24,
+    limit: int = 1000,
+    machine_key: str | None = None,
+) -> list[SensorReading]:
     since = utcnow() - timedelta(hours=hours)
     stmt = select(SensorReading).where(SensorReading.recorded_at >= since)
     if sensor_name:
         stmt = stmt.where(SensorReading.sensor_name == sensor_name)
+    if machine_key is not None:
+        stmt = stmt.where(SensorReading.machine_key == machine_key)
     stmt = stmt.order_by(desc(SensorReading.recorded_at)).limit(limit)
     return list(db.execute(stmt).scalars())
 
@@ -107,11 +123,13 @@ class SensorIngestionManager:
         baudrate: int,
         timeout_seconds: float,
         simulator: bool,
+        machine_key: str | None = None,
     ) -> None:
         self.devices = devices
         self.baudrate = baudrate
         self.timeout_seconds = timeout_seconds
         self.simulator = simulator
+        self.machine_key = machine_key
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
 
@@ -134,7 +152,7 @@ class SensorIngestionManager:
             temp = round(base_temp + random.uniform(-1.5, 1.5), 2)
             rh = round(base_rh + random.uniform(-3.0, 3.0), 2)
             with SessionLocal() as db:
-                save_reading(db, device.name, temp, rh, raw_payload="simulator")
+                save_reading(db, device.name, temp, rh, raw_payload="simulator", machine_key=self.machine_key)
             self._stop.wait(10)
 
     def _read_serial_device(self, device: SensorDevice) -> None:
@@ -151,7 +169,7 @@ class SensorIngestionManager:
                         try:
                             temp, rh = parse_sensor_line(raw)
                             with SessionLocal() as db:
-                                save_reading(db, device.name, temp, rh, raw_payload=raw)
+                                save_reading(db, device.name, temp, rh, raw_payload=raw, machine_key=self.machine_key)
                         except ValueError:
                             continue
             except Exception:

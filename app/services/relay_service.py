@@ -23,12 +23,31 @@ def get_relay(db: Session, relay_id: str) -> Relay:
     return relay
 
 
-def relay_history(db: Session, relay_id: str | None = None, limit: int = 200) -> list[RelayEvent]:
+def relay_history(
+    db: Session,
+    relay_id: str | None = None,
+    limit: int = 200,
+    machine_key: str | None = None,
+) -> list[RelayEvent]:
     stmt = select(RelayEvent).order_by(desc(RelayEvent.created_at)).limit(limit)
-    if relay_id is not None:
+    if relay_id is not None and machine_key is not None:
+        stmt = (
+            select(RelayEvent)
+            .where(RelayEvent.relay_id == relay_id, RelayEvent.machine_key == machine_key)
+            .order_by(desc(RelayEvent.created_at))
+            .limit(limit)
+        )
+    elif relay_id is not None:
         stmt = (
             select(RelayEvent)
             .where(RelayEvent.relay_id == relay_id)
+            .order_by(desc(RelayEvent.created_at))
+            .limit(limit)
+        )
+    elif machine_key is not None:
+        stmt = (
+            select(RelayEvent)
+            .where(RelayEvent.machine_key == machine_key)
             .order_by(desc(RelayEvent.created_at))
             .limit(limit)
         )
@@ -42,11 +61,13 @@ def apply_state(
     controller: RelayController,
     action: str = "set",
     trigger_source: str = "api",
+    machine_key: str | None = None,
 ) -> tuple[Relay, RelayEvent]:
     relay = get_relay(db, relay_id)
     if on and not relay.enabled:
         event = RelayEvent(
             relay_id=relay.id,
+            machine_key=machine_key,
             state=relay.is_on,
             action=action,
             trigger_source=trigger_source,
@@ -64,6 +85,7 @@ def apply_state(
         relay.last_changed_at = utcnow()
     event = RelayEvent(
         relay_id=relay.id,
+        machine_key=machine_key,
         state=on,
         action=action,
         trigger_source=trigger_source,
@@ -82,6 +104,7 @@ def toggle_relay(
     relay_id: str,
     controller: RelayController,
     trigger_source: str = "api",
+    machine_key: str | None = None,
 ) -> tuple[Relay, RelayEvent]:
     relay = get_relay(db, relay_id)
     return apply_state(
@@ -91,4 +114,5 @@ def toggle_relay(
         controller,
         action="toggle",
         trigger_source=trigger_source,
+        machine_key=machine_key,
     )

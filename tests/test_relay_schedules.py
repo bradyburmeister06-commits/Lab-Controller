@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.db.models import Relay, RelaySchedule, utcnow
 from app.db.session import SessionLocal
 from app.main import app
@@ -14,12 +15,18 @@ from app.services.relay_scheduler import RelayScheduler
 ADMIN_AUTH = ("admin", "change-me-now")
 
 
-def _reset_schedule(relay_id: str) -> None:
+def _default_key() -> str:
+    return get_settings().collector_id
+
+
+def _reset_schedule(relay_id: str, machine_key: str | None = None) -> None:
     """Force a schedule row back to a known disabled-OFF state."""
+    key = machine_key or _default_key()
     with SessionLocal() as db:
-        sched = db.get(RelaySchedule, relay_id)
+        sched = db.get(RelaySchedule, (key, relay_id))
         if sched is None:
             sched = RelaySchedule(
+                machine_key=key,
                 relay_id=relay_id,
                 enabled=False,
                 on_duration_seconds=60,
@@ -52,6 +59,7 @@ def test_default_schedules_exist_for_three_relays():
             assert "on_duration_seconds" in s
             assert "off_duration_seconds" in s
             assert "current_phase" in s
+            assert "machine_key" in s
 
 
 def test_relay_schedules_endpoint_requires_admin_auth():
@@ -163,27 +171,29 @@ def test_dashboard_includes_relay_schedules():
         for s in payload["relay_schedules"]:
             assert "relay_id" in s
             assert "enabled" in s
+            assert "machine_key" in s
 
 
 def test_admin_dashboard_html_has_schedule_section():
     with TestClient(app) as client:
         r = client.get("/admin", auth=ADMIN_AUTH)
         assert r.status_code == 200
-        assert "Independent schedule" in r.text
-        assert "data-relay-schedule-form" in r.text
+        # The new admin UI exposes per-machine SSR/relay schedule editors.
+        assert "Per-machine SSR / relay schedules" in r.text
+        assert "data-machine-schedule-form" in r.text
 
 
 def test_scheduler_tick_advances_phase_without_real_sleep():
     """Tick the scheduler manually with an elapsed next_run_at and verify phase flips."""
+    key = _default_key()
     _reset_schedule("relay-3")
     try:
         controller = MockRelayController({"relay-1": 0, "relay-2": 1, "relay-3": 2})
         controller.initialize()
-        scheduler = RelayScheduler(controller)
-        # We call .tick() directly so we don't need to start the BackgroundScheduler.
+        scheduler = RelayScheduler(controller, machine_key=key)
 
         with SessionLocal() as db:
-            sched = db.get(RelaySchedule, "relay-3")
+            sched = db.get(RelaySchedule, (key, "relay-3"))
             sched.enabled = True
             sched.on_duration_seconds = 5
             sched.off_duration_seconds = 5
@@ -194,7 +204,7 @@ def test_scheduler_tick_advances_phase_without_real_sleep():
         scheduler.tick()
 
         with SessionLocal() as db:
-            sched = db.get(RelaySchedule, "relay-3")
+            sched = db.get(RelaySchedule, (key, "relay-3"))
             assert sched.current_phase == "on"
             assert sched.next_run_at is not None
             relay = db.get(Relay, "relay-3")
@@ -205,7 +215,7 @@ def test_scheduler_tick_advances_phase_without_real_sleep():
         scheduler.tick()
 
         with SessionLocal() as db:
-            sched = db.get(RelaySchedule, "relay-3")
+            sched = db.get(RelaySchedule, (key, "relay-3"))
             assert sched.current_phase == "off"
     finally:
         _reset_schedule("relay-3")

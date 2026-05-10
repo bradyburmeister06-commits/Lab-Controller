@@ -37,6 +37,7 @@ class SensorReadingOut(BaseModel):
     relative_humidity: float
     recorded_at: datetime
     raw_payload: str | None
+    machine_key: str | None = None
 
 
 class SensorLatestOut(BaseModel):
@@ -76,6 +77,7 @@ class RelayUpdate(BaseModel):
 
 
 class RelayScheduleOut(BaseModel):
+    machine_key: str
     relay_id: str
     enabled: bool
     on_duration_seconds: int
@@ -110,6 +112,7 @@ class RelayEventOut(BaseModel):
     success: bool
     message: str | None
     created_at: datetime
+    machine_key: str | None = None
 
 
 class DashboardStatusOut(BaseModel):
@@ -120,6 +123,7 @@ class DashboardStatusOut(BaseModel):
     room: RoomSummaryOut
     relays: list[RelayOut] = Field(default_factory=list)
     relay_schedules: list[RelayScheduleOut] = Field(default_factory=list)
+    collectors: list["CollectorOut"] = Field(default_factory=list)
 
 
 class ManualTriggerOut(BaseModel):
@@ -147,32 +151,66 @@ class DataSummaryOut(BaseModel):
     system_logs: int
     relays: int = 0
     relay_events: int = 0
+    collectors: int = 0
 
 
 # --- Collector / hub split-mode schemas ---
 
 
+class CollectorRegisterIn(BaseModel):
+    collector_id: str
+    name: str | None = None
+    display_name: str | None = None
+    mode: str | None = None
+    host: str | None = None
+    hostname: str | None = None
+    software_version: str | None = None
+    relay_controller_mode: str | None = None
+    relay_controller_initialized: bool | None = None
+    runtime_state: str | None = None
+
+
 class CollectorHeartbeatIn(BaseModel):
     collector_id: str
     name: str | None = None
+    display_name: str | None = None
     mode: str | None = None
     host: str | None = None
+    hostname: str | None = None
+    software_version: str | None = None
     relay_controller_mode: str | None = None
     relay_controller_initialized: bool | None = None
+    runtime_state: str | None = None
     status_message: str | None = None
 
 
 class CollectorOut(BaseModel):
     id: str
+    machine_key: str
     name: str
+    display_name: str
+    role: str = "collector"
+    status: str = "unknown"
+    is_enabled: bool = True
     mode: str | None = None
     host: str | None = None
+    hostname: str | None = None
+    last_seen_ip: str | None = None
+    software_version: str | None = None
     last_heartbeat_at: datetime | None = None
     last_status_message: str | None = None
     relay_controller_mode: str | None = None
     relay_controller_initialized: bool = False
+    runtime_state: str | None = None
     online: bool = False
+    stale: bool = False
     seconds_since_heartbeat: int | None = None
+
+
+class CollectorUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    is_enabled: bool | None = None
+    role: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class CollectorSensorReadingIn(BaseModel):
@@ -223,3 +261,7 @@ class CollectorCommandAckIn(BaseModel):
     command_id: int
     success: bool = True
     message: str | None = None
+
+
+# Resolve forward reference for nested CollectorOut inside DashboardStatusOut.
+DashboardStatusOut.model_rebuild()

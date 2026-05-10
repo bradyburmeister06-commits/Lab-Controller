@@ -1567,3 +1567,190 @@ on one host. This is the original behavior and is unchanged.
   next poll. Hub-side reads (e.g. `is_on`) reflect the last status the
   collector pushed up.
 
+## Multi-collector deployment (one Mac hub + three Windows collectors)
+
+The hub holds a persistent **machine registry** in its database. You no
+longer hard-code the machine list in the hub's `.env` — every collector
+machine identifies itself with its own `COLLECTOR_ID`/`COLLECTOR_NAME`
+on its own `.env`, calls `POST /api/collector/register` once at startup,
+and shows up in the admin dashboard automatically. Each collector's
+SSR/relay schedules are stored independently in the hub DB, so three
+collectors can run three different intervals.
+
+### Architecture
+
+```
+                           +----------------------------+
+                           |  Mac hub (APP_MODE=hub)    |
+                           |  /admin /public web UI     |
+                           |  SQLite registry + schedules
+                           |  Port 8000 (Tailscale)     |
+                           +-----------+----------------+
+                                       ^
+              POST /api/collector/{register,heartbeat,...}
+                                       |
+       +-------------------+-------------------+-------------------+
+       |                   |                   |                   |
++----------------+ +----------------+ +----------------+ +----------------+
+| Windows Lab A  | | Windows Lab B  | | Windows Lab C  |    ...
+| collector      | | collector      | | collector      |
+| ID=lab-coll-a  | | ID=lab-coll-b  | | ID=lab-coll-c  |
+| ON=30 / OFF=90 | | ON=120 /OFF=600| | ON=5  / OFF=5  |
++----------------+ +----------------+ +----------------+
+```
+
+Each collector applies **only its own schedules** to its MCC USB-1208FS-Plus
+relay board. Hub-side admin edits to `lab-collector-a/relay-1` never reach
+`lab-collector-b`'s hardware.
+
+### 1. Set up the Mac hub
+
+```bash
+# On the Mac
+git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+cd Lab-Controller
+cp .env.hub.example .env
+# Edit .env: set ADMIN_PASSWORD and COLLECTOR_API_TOKEN
+docker compose -f docker-compose.hub.yml up -d --build
+```
+
+The hub's `.env` only contains infrastructure/security: `APP_MODE=hub`,
+`ADMIN_USERNAME`, `ADMIN_PASSWORD`, `COLLECTOR_API_TOKEN`,
+`DATABASE_URL`, `COLLECTOR_STALE_AFTER_SECONDS`. **It does not contain
+the list of lab machines** — that is built dynamically as each collector
+registers.
+
+### 2. Set up each Windows collector with a unique identity
+
+On every lab computer (three different machines in this example):
+
+```dotenv
+# Lab A — Windows native, real MCC hardware
+APP_MODE=collector
+HUB_BASE_URL=http://100.64.1.10:8000        # Tailscale IP of the Mac hub
+COLLECTOR_API_TOKEN=<same token as the hub>
+COLLECTOR_ID=lab-collector-a
+COLLECTOR_NAME=Lab A (incubator)
+RELAY_CONTROLLER=mcc_usb1208fs_plus
+```
+
+```dotenv
+# Lab B
+APP_MODE=collector
+HUB_BASE_URL=http://100.64.1.10:8000
+COLLECTOR_API_TOKEN=<same token>
+COLLECTOR_ID=lab-collector-b
+COLLECTOR_NAME=Lab B (humidity chamber)
+RELAY_CONTROLLER=mcc_usb1208fs_plus
+```
+
+```dotenv
+# Lab C
+APP_MODE=collector
+HUB_BASE_URL=http://100.64.1.10:8000
+COLLECTOR_API_TOKEN=<same token>
+COLLECTOR_ID=lab-collector-c
+COLLECTOR_NAME=Lab C (oven)
+RELAY_CONTROLLER=mcc_usb1208fs_plus
+```
+
+> Run the collector **natively on Windows** for real MCC hardware
+> (see [Windows-native collector for real MCC hardware](#windows-native-collector-for-real-mcc-hardware)).
+> Use the Docker collector for `RELAY_CONTROLLER=mock` integration tests
+> only.
+
+Start each collector. The first heartbeat creates the machine row in the
+hub's database; subsequent heartbeats update it.
+
+### 3. Verify each collector is online
+
+```bash
+# From the Mac (or any Tailscale node)
+curl -u admin:'YOUR_ADMIN_PASSWORD' http://100.64.1.10:8000/api/admin/machines | jq .
+# Expected: 3 entries with machine_key=lab-collector-{a,b,c}, online=true
+```
+
+Or open `http://100.64.1.10:8000/admin` and look at the
+**Registered collectors / machines** card.
+
+### 4. Set three different ON/OFF intervals from the Mac
+
+You can edit each machine's relay-1/2/3 schedules from the admin UI's
+**Per-machine SSR / relay schedules** card, or from the API:
+
+```bash
+ADMIN=admin:'YOUR_ADMIN_PASSWORD'
+HUB=http://100.64.1.10:8000
+
+# Lab A: relay-1 cycles 30s ON, 90s OFF
+curl -u "$ADMIN" -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"on_duration_seconds":30,"off_duration_seconds":90}' \
+  "$HUB/api/admin/machines/lab-collector-a/relay-schedules/relay-1"
+
+# Lab B: relay-1 cycles 120s ON, 600s OFF
+curl -u "$ADMIN" -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"on_duration_seconds":120,"off_duration_seconds":600}' \
+  "$HUB/api/admin/machines/lab-collector-b/relay-schedules/relay-1"
+
+# Lab C: relay-1 cycles 5s ON, 5s OFF (fast test)
+curl -u "$ADMIN" -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"on_duration_seconds":5,"off_duration_seconds":5}' \
+  "$HUB/api/admin/machines/lab-collector-c/relay-schedules/relay-1"
+```
+
+Lab A's relay-1 keeps cycling 30/90 even after Lab B's relay-1 is
+edited. Each collector polls `GET /api/collector/poll?collector_id=...`
+and only receives schedule rows scoped to its own `collector_id`.
+
+### 5. Manual registration / connectivity smoke tests
+
+```bash
+TOKEN='your-collector-api-token'
+HUB=http://100.64.1.10:8000
+
+# Register
+curl -X POST -H "X-Collector-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"collector_id":"lab-collector-a","display_name":"Lab A","mode":"collector",
+       "host":"lab-a.lan","hostname":"LAB-A-PC","software_version":"0.2.0",
+       "relay_controller_mode":"mcc_usb1208fs_plus","relay_controller_initialized":true}' \
+  "$HUB/api/collector/register"
+
+# Heartbeat
+curl -X POST -H "X-Collector-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"collector_id":"lab-collector-a","status_message":"ok","runtime_state":"running"}' \
+  "$HUB/api/collector/heartbeat"
+
+# Poll (returns only this collector's schedules + commands)
+curl -H "X-Collector-Token: $TOKEN" \
+  "$HUB/api/collector/poll?collector_id=lab-collector-a"
+```
+
+### Admin endpoints (Basic Auth)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/admin/machines` | List all registered collectors. |
+| `GET /api/admin/machines/{key}` | One machine. |
+| `PATCH /api/admin/machines/{key}` | Rename / enable / disable / change role. |
+| `POST /api/admin/machines/{key}/disable` | Disable. |
+| `POST /api/admin/machines/{key}/enable` | Re-enable. |
+| `GET /api/admin/machines/{key}/relay-schedules` | This machine's three schedules. |
+| `GET /api/admin/machines/{key}/relay-schedules/{relay_id}` | One schedule. |
+| `PATCH /api/admin/machines/{key}/relay-schedules/{relay_id}` | Edit ON/OFF + enable. |
+
+### Notes
+
+- The hub starts with **zero collectors** — `/admin` shows
+  "No collectors connected yet" until at least one collector posts a
+  heartbeat. This is expected.
+- `COLLECTOR_STALE_AFTER_SECONDS` (default `60`) controls when a
+  collector flips from `online` to `stale` in the registry.
+- The legacy single-machine endpoints (`/api/relay-schedules`,
+  `/api/relays/{id}/schedule`) still work in `all_in_one` mode and
+  default to the local collector's machine_key for backward compat.
+- The public dashboard remains read-only and shows multi-machine cards
+  on `/public` and `/api/public/dashboard`.
+

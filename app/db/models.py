@@ -48,6 +48,7 @@ class SensorReading(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sensor_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    machine_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     temperature: Mapped[float] = mapped_column(Float, nullable=False)
     relative_humidity: Mapped[float] = mapped_column(Float, nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -88,6 +89,7 @@ class RelayEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     relay_id: Mapped[str] = mapped_column(ForeignKey("relays.id"), nullable=False)
+    machine_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     state: Mapped[bool] = mapped_column(Boolean, nullable=False)
     action: Mapped[str] = mapped_column(String(32), nullable=False, default="set")
     trigger_source: Mapped[str] = mapped_column(String(32), nullable=False, default="api")
@@ -99,9 +101,17 @@ class RelayEvent(Base):
 
 
 class RelaySchedule(Base):
+    """Per-machine, per-relay independent ON/OFF cycle configuration.
+
+    Each (machine_key, relay_id) pair owns its own enabled flag, durations,
+    and current cycle state. This is what lets three collectors run three
+    different intervals without colliding.
+    """
+
     __tablename__ = "relay_schedules"
 
-    relay_id: Mapped[str] = mapped_column(ForeignKey("relays.id"), primary_key=True)
+    machine_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    relay_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     on_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
     off_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
@@ -114,20 +124,39 @@ class RelaySchedule(Base):
 
 
 class Collector(Base):
+    """Persistent registry of collector machines that have registered with the hub.
+
+    This is the canonical multi-machine registry. The hub no longer relies on a
+    single static machine definition in its environment file — every collector
+    that registers (or sends a heartbeat) gets a row here.
+    """
+
     __tablename__ = "collectors"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="collector", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_seen_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    software_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     relay_controller_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     relay_controller_initialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    runtime_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+
+    @property
+    def name(self) -> str:
+        # Back-compat alias used by older code paths and the API.
+        return self.display_name
 
 
 class CollectorCommand(Base):

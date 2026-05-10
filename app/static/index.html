@@ -402,14 +402,19 @@
       </section>
 
       <section class="card">
-        <h2>Collector status</h2>
-        <div id="collectorStatus" class="relay-controller-info">
-          <div class="note">Loading collector status...</div>
-        </div>
+        <h2>Registered collectors / machines</h2>
+        <div id="collectorList"><div class="note" style="color:var(--muted)">Loading collector list...</div></div>
       </section>
 
       <section class="card">
-        <h2>Relay Control</h2>
+        <h2>Per-machine SSR / relay schedules</h2>
+        <p style="color:var(--muted);margin:0 0 12px;">Each registered collector has its own independent ON/OFF intervals for every SSR/relay. Edits below only affect the selected machine.</p>
+        <div id="machineSchedulesFeedback" class="feedback" role="status" aria-live="polite"></div>
+        <div id="machineSchedulesContainer"></div>
+      </section>
+
+      <section class="card">
+        <h2>Local Relay Control (this machine)</h2>
         <div id="relayControllerInfo" class="relay-controller-info">
           <div class="note">Loading relay controller status...</div>
         </div>
@@ -422,6 +427,7 @@
           <button class="tab active" data-tab="readings">Sensor readings</button>
           <button class="tab" data-tab="activations">Activations</button>
           <button class="tab" data-tab="machines">Machines</button>
+          <button class="tab" data-tab="collectors">Collector registry</button>
           <button class="tab" data-tab="relays">Relay history</button>
           <button class="tab" data-tab="logs">Logs</button>
           <button class="tab" data-tab="summary">Database summary</button>
@@ -430,6 +436,7 @@
         <div id="tab-readings" class="table-wrap"></div>
         <div id="tab-activations" class="table-wrap hidden"></div>
         <div id="tab-machines" class="table-wrap hidden"></div>
+        <div id="tab-collectors" class="table-wrap hidden"></div>
         <div id="tab-relays" class="table-wrap hidden"></div>
         <div id="tab-logs" class="table-wrap hidden"></div>
         <div id="tab-summary" class="table-wrap hidden"></div>
@@ -769,9 +776,9 @@
       }
 
       function renderCollectorStatus(collectors) {
-        const target = document.getElementById("collectorStatus");
+        const target = document.getElementById("collectorList");
         if (!collectors || !collectors.length) {
-          target.innerHTML = '<div class="note">No collectors registered yet. The first collector heartbeat will appear here.</div>';
+          target.innerHTML = '<div class="note" style="color:var(--muted)">No collectors connected yet. The first collector heartbeat will appear here.</div>';
           return;
         }
         target.innerHTML = collectors
@@ -781,16 +788,186 @@
               c.seconds_since_heartbeat === null || c.seconds_since_heartbeat === undefined
                 ? "never"
                 : `${c.seconds_since_heartbeat}s ago`;
+            const enabledBadge = c.is_enabled
+              ? `<span class="badge">enabled</span>`
+              : `<span class="badge disabled">disabled</span>`;
             return `
-              <div><strong>${escapeHtml(c.name || c.id)}</strong>Collector</div>
-              <div><strong>${escapeHtml(c.mode || "—")}</strong>Mode</div>
-              <div><strong>${escapeHtml(c.host || "—")}</strong>Host</div>
-              <div><strong>${escapeHtml(c.relay_controller_mode || "—")}</strong>Hardware</div>
-              <div><strong>${label}</strong>Status</div>
-              <div><strong>${escapeHtml(sinceLabel)}</strong>Last heartbeat</div>
+              <div class="relay-controller-info" style="margin-bottom:10px;">
+                <div><strong>${escapeHtml(c.display_name || c.name || c.id)} ${enabledBadge}</strong>Collector</div>
+                <div><strong>${escapeHtml(c.machine_key || c.id)}</strong>Machine key</div>
+                <div><strong>${label}</strong>Status</div>
+                <div><strong>${escapeHtml(sinceLabel)}</strong>Last heartbeat</div>
+                <div><strong>${escapeHtml(c.hostname || c.host || "—")}</strong>Hostname</div>
+                <div><strong>${escapeHtml(c.last_seen_ip || "—")}</strong>Last IP</div>
+                <div><strong>${escapeHtml(c.software_version || "—")}</strong>Version</div>
+                <div><strong>${escapeHtml(c.relay_controller_mode || "—")}</strong>Hardware</div>
+                <div><strong>${escapeHtml(c.runtime_state || "—")}</strong>Runtime state</div>
+                <details class="full" style="grid-column: 1 / -1;">
+                  <summary style="cursor:pointer;color:var(--muted);font-size:13px;">Edit machine settings</summary>
+                  <form class="relay-form" data-collector-form="${escapeHtml(c.id)}" style="margin-top:10px;">
+                    <label class="full">Display name<input name="display_name" value="${escapeHtml(c.display_name || "")}" required maxlength="120" /></label>
+                    <label>Enabled
+                      <select name="is_enabled">
+                        <option value="true" ${c.is_enabled ? "selected" : ""}>Enabled</option>
+                        <option value="false" ${!c.is_enabled ? "selected" : ""}>Disabled</option>
+                      </select>
+                    </label>
+                    <div class="actions full" style="margin-top:0;">
+                      <button type="submit">Save machine</button>
+                    </div>
+                  </form>
+                </details>
+              </div>
             `;
           })
           .join("");
+
+        target.querySelectorAll("[data-collector-form]").forEach((form) =>
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const id = form.dataset.collectorForm;
+            const fd = new FormData(form);
+            const body = {
+              display_name: fd.get("display_name"),
+              is_enabled: fd.get("is_enabled") === "true",
+            };
+            await wrapMachineAction(`Save machine ${id}`, () => patchJson(`/api/admin/machines/${encodeURIComponent(id)}`, body));
+          }),
+        );
+      }
+
+      let machineFeedbackTimer;
+      function showMachineFeedback(level, message) {
+        const el = document.getElementById("machineSchedulesFeedback");
+        el.className = `feedback show ${level}`;
+        el.textContent = message;
+        if (machineFeedbackTimer) clearTimeout(machineFeedbackTimer);
+        machineFeedbackTimer = setTimeout(() => {
+          el.className = "feedback";
+        }, level === "error" ? 8000 : 4000);
+      }
+
+      async function wrapMachineAction(label, fn) {
+        showMachineFeedback("info", `${label}...`);
+        try {
+          const result = await fn();
+          showMachineFeedback("success", `${label} succeeded.`);
+          await refreshAll();
+          return result;
+        } catch (err) {
+          showMachineFeedback("error", `${label} failed: ${err.message || err}`);
+          console.error(err);
+        }
+      }
+
+      function renderMachineSchedules(collectors, relays) {
+        const target = document.getElementById("machineSchedulesContainer");
+        if (!collectors || !collectors.length) {
+          target.innerHTML = '<div class="note" style="color:var(--muted)">No collectors connected yet — register a collector and per-machine schedules will appear here.</div>';
+          return;
+        }
+        target.innerHTML = collectors
+          .map((c) => {
+            const machineKey = c.machine_key || c.id;
+            return `
+              <div class="card" style="box-shadow:none;margin-bottom:14px;">
+                <h2 style="margin-bottom:6px;">${escapeHtml(c.display_name || c.id)} <span class="badge">${escapeHtml(machineKey)}</span></h2>
+                <div class="metric-sub" style="margin-bottom:10px;">${c.online ? "online" : "stale"} · ${escapeHtml(c.last_status_message || "—")}</div>
+                <div data-machine-schedules="${escapeHtml(machineKey)}" class="grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
+                  <div class="note" style="color:var(--muted)">Loading schedules…</div>
+                </div>
+              </div>
+            `;
+          })
+          .join("");
+
+        // Now fetch each machine's schedules and render them.
+        collectors.forEach(async (c) => {
+          const machineKey = c.machine_key || c.id;
+          const container = target.querySelector(`[data-machine-schedules="${cssEscape(machineKey)}"]`);
+          if (!container) return;
+          let schedules;
+          try {
+            schedules = await getJson(`/api/admin/machines/${encodeURIComponent(machineKey)}/relay-schedules`);
+          } catch (err) {
+            container.innerHTML = `<div class="note" style="color:var(--danger)">Could not load schedules: ${escapeHtml(err.message || err)}</div>`;
+            return;
+          }
+          renderSingleMachineSchedules(container, machineKey, schedules, relays);
+        });
+      }
+
+      function cssEscape(value) {
+        // Minimal CSS attribute selector escaping; keys are constrained to
+        // [a-z0-9._-] but be defensive anyway.
+        if (window.CSS && window.CSS.escape) return window.CSS.escape(value);
+        return String(value).replace(/(["\\\\])/g, "\\\\$1");
+      }
+
+      function renderSingleMachineSchedules(container, machineKey, schedules, relays) {
+        const scheduleMap = {};
+        (schedules || []).forEach((s) => { scheduleMap[s.relay_id] = s; });
+        if (!relays || !relays.length) {
+          container.innerHTML = '<p>No relays configured.</p>';
+          return;
+        }
+        container.innerHTML = relays
+          .map((r) => {
+            const s = scheduleMap[r.id] || {
+              enabled: false,
+              on_duration_seconds: 60,
+              off_duration_seconds: 60,
+              next_run_at: null,
+              current_phase: "off",
+            };
+            return `
+              <div class="relay-card">
+                <div>
+                  <div class="metric-label">${escapeHtml(r.name)}</div>
+                  <div class="metric-sub">${escapeHtml(r.id)} · machine <strong>${escapeHtml(machineKey)}</strong></div>
+                </div>
+                <div class="meta">
+                  <span>Schedule</span><strong>${s.enabled ? "running" : "off"}</strong>
+                  <span>Phase</span><strong>${escapeHtml(s.current_phase || "off")}</strong>
+                  <span>Next flip</span><strong>${escapeHtml(fmtDate(s.next_run_at))}</strong>
+                </div>
+                <form class="relay-form"
+                      data-machine-schedule-form
+                      data-machine-key="${escapeHtml(machineKey)}"
+                      data-relay-id="${escapeHtml(r.id)}">
+                  <label>ON duration (s)<input name="on_duration_seconds" type="number" min="1" max="86400" value="${Number(s.on_duration_seconds || 60)}" required /></label>
+                  <label>OFF duration (s)<input name="off_duration_seconds" type="number" min="1" max="86400" value="${Number(s.off_duration_seconds || 60)}" required /></label>
+                  <label>Schedule
+                    <select name="enabled">
+                      <option value="true" ${s.enabled ? "selected" : ""}>Enabled</option>
+                      <option value="false" ${!s.enabled ? "selected" : ""}>Disabled</option>
+                    </select>
+                  </label>
+                  <div class="actions full" style="margin-top:0;">
+                    <button type="submit">Save schedule</button>
+                  </div>
+                </form>
+              </div>
+            `;
+          })
+          .join("");
+        container.querySelectorAll("[data-machine-schedule-form]").forEach((form) =>
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const mk = form.dataset.machineKey;
+            const relayId = form.dataset.relayId;
+            const fd = new FormData(form);
+            const body = {
+              enabled: fd.get("enabled") === "true",
+              on_duration_seconds: Number(fd.get("on_duration_seconds")),
+              off_duration_seconds: Number(fd.get("off_duration_seconds")),
+            };
+            await wrapMachineAction(
+              `Save schedule for ${mk}/${relayId}`,
+              () => patchJson(`/api/admin/machines/${encodeURIComponent(mk)}/relay-schedules/${encodeURIComponent(relayId)}`, body),
+            );
+          }),
+        );
       }
 
       async function refreshAll() {
@@ -819,6 +996,18 @@
           }),
         ]);
         renderCollectorStatus(collectors);
+        renderMachineSchedules(collectors, relays);
+
+        renderTable("tab-collectors", [
+          { key: "machine_key", label: "Machine key" },
+          { key: "display_name", label: "Display name" },
+          { key: "status", label: "Status" },
+          { key: "is_enabled", label: "Enabled", format: (v) => (v ? "yes" : "no") },
+          { key: "hostname", label: "Hostname" },
+          { key: "last_seen_ip", label: "Last IP" },
+          { key: "software_version", label: "Version" },
+          { key: "last_heartbeat_at", label: "Last heartbeat", format: fmtDate },
+        ], collectors);
 
         currentMachineId = dashboard.machine.id;
         document.getElementById("healthStatus").textContent = `Backend ${health.status}, scheduler ${health.scheduler_running ? "running" : "stopped"}`;

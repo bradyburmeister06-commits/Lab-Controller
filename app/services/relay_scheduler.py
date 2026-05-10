@@ -17,17 +17,29 @@ logger = logging.getLogger("app.relay_scheduler")
 
 
 class RelayScheduler:
-    """Per-relay independent ON/OFF cycle scheduler.
+    """Per-relay independent ON/OFF cycle scheduler bound to a single machine_key.
 
-    Each relay has its own RelaySchedule row. While enabled, the relay cycles:
-    ON for on_duration_seconds, then OFF for off_duration_seconds, repeating.
-    Disable safely transitions the relay to OFF and clears next_run_at.
+    Each (machine_key, relay_id) pair has its own RelaySchedule row. While
+    enabled, the relay cycles ON for ``on_duration_seconds`` then OFF for
+    ``off_duration_seconds``, repeating. Disable safely transitions the relay
+    OFF and clears next_run_at.
+
+    The scheduler instance only ever advances schedules whose machine_key
+    matches the local machine. That keeps a collector running schedule X from
+    accidentally executing another collector's cycle even if both rows live in
+    the same database (e.g. all_in_one development).
     """
 
     TICK_SECONDS = 1
 
-    def __init__(self, controller: RelayController, tick_seconds: int | None = None) -> None:
+    def __init__(
+        self,
+        controller: RelayController,
+        machine_key: str,
+        tick_seconds: int | None = None,
+    ) -> None:
         self.controller = controller
+        self.machine_key = machine_key
         self.scheduler = BackgroundScheduler()
         self._locks: dict[str, threading.Lock] = {}
         self._lock_guard = threading.Lock()
@@ -63,13 +75,14 @@ class RelayScheduler:
             return lock
 
     def tick(self) -> None:
-        """Process all relay schedules whose next_run_at has elapsed."""
+        """Process schedules for this machine whose next_run_at has elapsed."""
         try:
             with SessionLocal() as db:
                 now = utcnow()
                 schedules = list(
                     db.execute(
                         select(RelaySchedule).where(
+                            RelaySchedule.machine_key == self.machine_key,
                             RelaySchedule.enabled.is_(True),
                             RelaySchedule.next_run_at.is_not(None),
                             RelaySchedule.next_run_at <= now,
@@ -87,7 +100,7 @@ class RelayScheduler:
         if not lock.acquire(blocking=False):
             return
         try:
-            sched = db.get(RelaySchedule, relay_id)
+            sched = db.get(RelaySchedule, (self.machine_key, relay_id))
             if sched is None or not sched.enabled:
                 return
             now = utcnow()
@@ -109,6 +122,7 @@ class RelayScheduler:
                 self.controller,
                 action="schedule",
                 trigger_source="schedule",
+                machine_key=self.machine_key,
             )
             sched.current_phase = "on" if next_on else "off"
             sched.next_run_at = now + timedelta(seconds=max(1, int(duration)))
@@ -117,16 +131,25 @@ class RelayScheduler:
         finally:
             lock.release()
 
-    def apply_schedule_change(self, db, relay_id: str) -> RelaySchedule | None:
+    def apply_schedule_change(
+        self, db, relay_id: str, machine_key: str | None = None
+    ) -> RelaySchedule | None:
         """Apply schedule changes immediately without waiting for the next tick.
 
-        Called by the admin API after updating a schedule. If newly enabled,
-        immediately starts the cycle (turn ON, schedule OFF). If disabled,
-        forces relay to OFF and clears next_run_at.
+        ``machine_key`` defaults to the scheduler's bound machine_key. Callers
+        in hub mode may pass another machine_key, but this scheduler instance
+        only executes hardware changes for its own bound machine.
         """
+        key = machine_key or self.machine_key
+        # We only apply hardware effects when the targeted machine_key matches
+        # this scheduler's local machine. Otherwise the change is recorded by
+        # the caller (admin API) and shipped via collector_hub commands.
+        if key != self.machine_key:
+            return db.get(RelaySchedule, (key, relay_id))
+
         lock = self._lock_for(relay_id)
         with lock:
-            sched = db.get(RelaySchedule, relay_id)
+            sched = db.get(RelaySchedule, (key, relay_id))
             if sched is None:
                 return None
             if not sched.enabled:
@@ -140,6 +163,7 @@ class RelayScheduler:
                         self.controller,
                         action="schedule",
                         trigger_source="schedule",
+                        machine_key=key,
                     )
                 sched.current_phase = "off"
                 sched.next_run_at = None
@@ -156,6 +180,7 @@ class RelayScheduler:
                 self.controller,
                 action="schedule",
                 trigger_source="schedule",
+                machine_key=key,
             )
             sched.current_phase = "on"
             sched.next_run_at = utcnow() + timedelta(seconds=max(1, int(sched.on_duration_seconds)))
