@@ -33,7 +33,7 @@ if %ERRORLEVEL%==0 (
 )
 
 if "%PY_CMD%"=="" (
-    echo [ERROR] Could not find Python. Install Python 3.11 or 3.12 64-bit
+    echo [ERROR] Could not find Python. Install Python 3.11, 3.12, or 3.13 64-bit
     echo         from https://www.python.org/downloads/windows/ and tick
     echo         "Add python.exe to PATH" during install.
     exit /b 1

@@ -153,9 +153,11 @@ The four scripts in the repo root drive the entire lifecycle:
 
 #### First-time setup on the lab Windows computer
 
-1. Install **Python 3.11 or 3.12 64-bit** from
+1. Install **Python 3.11, 3.12, or 3.13 64-bit** from
    <https://www.python.org/downloads/windows/>. Tick "Add python.exe to
-   PATH".
+   PATH". (The dependency stack — Pydantic 2.13, FastAPI 0.136 — is
+   tested on 3.10–3.13. Python 3.14 should also work but is not yet
+   validated against `mcculw`.)
 2. Install **MCC Universal Library / InstaCal** from
    <https://www.mccdaq.com/Software-Downloads> and configure the
    USB-1208FS-Plus as **board 0**.
@@ -1140,7 +1142,7 @@ The USB-1208FS-Plus digital outputs are **TTL-level I/O**. They must **not** dri
 
 Docker on Windows talks to the Linux WSL kernel and **cannot** use `mcculw`. To control real relays, run the backend natively on Windows.
 
-1. **Install Python 3.12 (64-bit)** from <https://www.python.org/downloads/windows/>. Tick "Add python.exe to PATH" during install.
+1. **Install Python 3.12 or 3.13 (64-bit)** from <https://www.python.org/downloads/windows/>. Tick "Add python.exe to PATH" during install. (The dependency stack supports 3.10–3.13.)
 2. **Install MCC DAQ Software** (includes Universal Library and InstaCal): <https://www.mccdaq.com/Software-Downloads>. Reboot if prompted.
 3. **Open InstaCal**, plug in the USB-1208FS-Plus, and confirm it is listed as **Board 0** (or whatever you set in `MCC_BOARD_NUM`). Click _Test_ → _Digital_ to confirm DIO works.
 4. **Clone the repo and create a venv** (PowerShell):
@@ -1148,7 +1150,7 @@ Docker on Windows talks to the Linux WSL kernel and **cannot** use `mcculw`. To 
    ```powershell
    git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
    cd Lab-Controller
-   py -3.12 -m venv .venv
+   py -3.13 -m venv .venv
    .\.venv\Scripts\Activate.ps1
    python -m pip install --upgrade pip
    pip install -r requirements.txt
