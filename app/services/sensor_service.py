@@ -133,6 +133,10 @@ class SensorIngestionManager:
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
 
+    @property
+    def running(self) -> bool:
+        return any(t.is_alive() for t in self._threads) and not self._stop.is_set()
+
     def start(self) -> None:
         for device in self.devices:
             target = self._simulate_device if self.simulator else self._read_serial_device

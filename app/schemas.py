@@ -134,6 +134,13 @@ class HealthOut(BaseModel):
     status: str
     database: str
     scheduler_running: bool
+    app_mode: str | None = None
+    collector_id: str | None = None
+    collector_agent_running: bool | None = None
+    relay_controller_mode: str | None = None
+    sensor_manager_running: bool | None = None
+    relay_scheduler_running: bool | None = None
+    hub_base_url: str | None = None
 
 
 class SystemLogOut(BaseModel):

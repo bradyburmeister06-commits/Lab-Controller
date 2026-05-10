@@ -198,8 +198,23 @@ def room_summary(db: Session) -> RoomSummaryOut:
 @router.get("/health", response_model=HealthOut)
 def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
     db.execute(select(Machine).limit(1)).first()
+    settings = get_settings()
     scheduler = getattr(request.app.state, "machine_scheduler", None)
-    return HealthOut(status="ok", database="ok", scheduler_running=bool(scheduler and scheduler.running))
+    sensor_manager = getattr(request.app.state, "sensor_manager", None)
+    relay_scheduler = getattr(request.app.state, "relay_scheduler", None)
+    collector_agent = getattr(request.app.state, "collector_agent", None)
+    return HealthOut(
+        status="ok",
+        database="ok",
+        scheduler_running=bool(scheduler and scheduler.running),
+        app_mode=settings.app_mode,
+        collector_id=settings.collector_id,
+        collector_agent_running=bool(collector_agent and collector_agent.running) if collector_agent is not None else None,
+        relay_controller_mode=settings.relay_controller,
+        sensor_manager_running=bool(sensor_manager and sensor_manager.running) if sensor_manager is not None else None,
+        relay_scheduler_running=bool(relay_scheduler and relay_scheduler.running) if relay_scheduler is not None else None,
+        hub_base_url=settings.hub_base_url if settings.app_mode == "collector" else None,
+    )
 
 
 @router.get("/dashboard", response_model=DashboardStatusOut)

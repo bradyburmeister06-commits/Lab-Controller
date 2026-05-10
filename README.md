@@ -119,6 +119,159 @@ To stop the container and delete all stored SQLite data:
 docker compose down -v
 ```
 
+### Windows Collector Quick Start (one-command native start)
+
+This is the path you want when the lab Windows computer drives a real
+**MCC USB-1208FS-Plus** board and three SSRs. Docker on Windows cannot use
+the `mcculw` driver (it is Windows-only and the Linux container cannot see
+the USB device), so the collector must run **natively on Windows** —
+**not** in Docker, **not** in WSL.
+
+The four scripts in the repo root drive the entire lifecycle:
+
+| Script                          | What it does |
+|---------------------------------|--------------|
+| `setup-collector-windows.bat`   | First-time setup: creates `.venv`, installs `requirements.txt` + `requirements-windows.txt`, copies `.env.collector.example` to `.env`. |
+| `start-collector.bat`           | Preflight checks (`.env`, `.venv`, `APP_MODE=collector`, hub URL placeholder, token placeholder, `mcculw` import), then runs `uvicorn app.main:app --host 0.0.0.0 --port 8001` and writes a PID file + `logs\collector.log`. |
+| `stop-collector.bat`            | Stops the collector using the PID file, falls back to whatever process is listening on TCP 8001. |
+| `status-collector.bat`          | Reports running/not-running, prints `COLLECTOR_ID` / `HUB_BASE_URL` from `.env`, hits `/api/health` locally and on the hub. |
+
+> **Hardware topology assumed by the defaults:** ONE Windows collector +
+> ONE MCC USB-1208FS-Plus + THREE SSR-controlled machines. Each machine
+> maps to one DIO bit on the same MCC board:
+>
+> | Hub admin label | Local relay id | MCC pin             |
+> |-----------------|----------------|---------------------|
+> | machine 1       | `relay-1`      | Port B bit 0 (`B0`) |
+> | machine 2       | `relay-2`      | Port B bit 1 (`B1`) |
+> | machine 3       | `relay-3`      | Port B bit 2 (`B2`) |
+>
+> Per-machine ON/OFF intervals are still edited from the hub `/admin` UI
+> and apply to those three relays on this collector. The hub still
+> supports N collectors if you ever add more hardware nodes — see
+> [Multi-collector deployment (one Mac hub + three Windows collectors)](#multi-collector-deployment-one-mac-hub--three-windows-collectors).
+
+#### First-time setup on the lab Windows computer
+
+1. Install **Python 3.11 or 3.12 64-bit** from
+   <https://www.python.org/downloads/windows/>. Tick "Add python.exe to
+   PATH".
+2. Install **MCC Universal Library / InstaCal** from
+   <https://www.mccdaq.com/Software-Downloads> and configure the
+   USB-1208FS-Plus as **board 0**.
+3. Install **Tailscale** and join the same tailnet as the hub.
+4. Open **Command Prompt** and clone the repo:
+
+   ```bat
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   setup-collector-windows.bat
+   ```
+
+5. Open the freshly created `.env` in Notepad and edit at minimum:
+
+   ```dotenv
+   APP_MODE=collector
+   HUB_BASE_URL=http://100.x.y.z:8000          REM hub's Tailscale IP or URL
+   COLLECTOR_API_TOKEN=<long random secret>     REM must match the hub
+   COLLECTOR_ID=lab-mcc-controller
+   COLLECTOR_NAME=Lab MCC Controller
+   RELAY_CONTROLLER=mcc_usb1208fs_plus
+   SENSOR_SIMULATOR=false
+   ARDUINO_1_PORT=COM3
+   ARDUINO_2_PORT=COM4
+   ```
+
+6. Start the collector:
+
+   ```bat
+   start-collector.bat
+   ```
+
+   The script aborts with a clear error if any preflight check fails
+   (placeholder hub URL, default token, `APP_MODE` not `collector`,
+   `mcculw` not importable, …).
+
+7. Confirm it registered with the hub: open the hub's `/admin` page and
+   look under **Collector status** for `lab-mcc-controller`.
+
+#### Daily startup
+
+```bat
+cd C:\path\to\Lab-Controller
+start-collector.bat
+```
+
+That single command runs preflight, starts uvicorn, starts the
+`CollectorAgent` background loop (which handles **data collection** from
+Arduino sensors, the **relay timing/schedule loops** for relay-1/2/3,
+and **hub sync / heartbeat / register / poll**), and writes
+`logs\collector.log`. There is nothing else to launch.
+
+#### Status / restart / stop
+
+```bat
+status-collector.bat       REM Is it running? Is the hub reachable?
+stop-collector.bat         REM Clean stop using the PID file.
+start-collector.bat        REM Restart = stop, then start.
+```
+
+To restart in one go:
+
+```bat
+stop-collector.bat && start-collector.bat
+```
+
+#### Make the collector start automatically on boot/login (Task Scheduler)
+
+You want the collector to come back up after a power cut without anyone
+logging in.
+
+1. Open **Task Scheduler** (`taskschd.msc`).
+2. **Action -> Create Task...** (NOT "Create Basic Task" — you need the
+   advanced options).
+3. **General** tab:
+   - Name: `Lab Controller collector`
+   - Select **Run whether user is logged on or not**.
+   - Tick **Run with highest privileges**.
+   - Configure for: Windows 10 / Windows 11.
+4. **Triggers** tab -> **New...**:
+   - Begin the task: **At startup**.
+   - (Optional second trigger: **At log on** of the lab user, if you also
+     want it to relaunch after an interactive logon.)
+   - Tick **Enabled**.
+5. **Actions** tab -> **New...**:
+   - Action: **Start a program**.
+   - Program/script: `C:\path\to\Lab-Controller\start-collector.bat`
+   - **Start in (optional):** `C:\path\to\Lab-Controller`
+     (this is required — `start-collector.bat` resolves `.env`/`.venv`
+     relative to its working directory).
+6. **Conditions** tab: untick **Start the task only if the computer is
+   on AC power** (so it survives on a UPS).
+7. **Settings** tab:
+   - Tick **Allow task to be run on demand**.
+   - **If the task fails, restart every:** 1 minute, up to 3 times.
+   - **Stop the task if it runs longer than:** uncheck (this is a
+     long-running service).
+8. Click **OK**, enter the Windows password for the account when prompted.
+
+To verify, right-click the task -> **Run**, then run
+`status-collector.bat` from any Command Prompt — it should report
+RUNNING with the configured `COLLECTOR_ID` and `HUB_BASE_URL`.
+
+> **Why not Docker on the lab machine?** The MCC `mcculw` driver is a
+> Windows-only DLL. Docker Desktop on Windows runs Linux containers in
+> WSL and cannot reach `mcculw`. USB passthrough into a Linux container
+> on Windows is also not reliably supported. Run the **hub** in Docker
+> on the home server if you like, but run the **collector** natively on
+> Windows for real MCC + SSR control.
+>
+> **Tailscale must already be up.** `start-collector.bat` will succeed
+> on preflight as long as `HUB_BASE_URL` is non-placeholder, but the
+> `CollectorAgent` won't be able to reach the hub if the tailnet isn't
+> connected. `status-collector.bat` shows hub reachability so you can
+> tell which side is broken.
+
 ### Docker with real Arduinos
 
 Edit `docker-compose.yml`:
@@ -1310,6 +1463,14 @@ small local buffer lives in `machine_research_collector_data`.
 Use this path when the lab computer is Windows AND you need real MCC
 USB-1208FS-Plus relay control. Docker is **not** used on the collector
 side here — the hub computer can still run inside Docker.
+
+> **TL;DR:** for a fresh lab Windows box, just follow
+> [Windows Collector Quick Start (one-command native start)](#windows-collector-quick-start-one-command-native-start)
+> above. The four batch scripts (`setup-collector-windows.bat`,
+> `start-collector.bat`, `stop-collector.bat`, `status-collector.bat`)
+> wrap everything below into one command per lifecycle step and add
+> preflight checks. The detailed steps below remain accurate if you want
+> to do it by hand.
 
 1. On the lab Windows machine, install Python 3.11+, MCC InstaCal, and
    join the tailnet. From `cmd.exe`:

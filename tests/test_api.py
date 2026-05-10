@@ -12,6 +12,13 @@ def test_health_endpoint():
         payload = response.json()
         assert payload["status"] == "ok"
         assert payload["database"] == "ok"
+        # Status-script-relevant fields surface app/collector state.
+        assert "app_mode" in payload
+        assert "collector_id" in payload
+        assert "relay_controller_mode" in payload
+        # In all_in_one (test default) the collector agent is not constructed,
+        # so the field is null rather than a bool.
+        assert payload["app_mode"] in ("all_in_one", "hub", "collector")
 
 
 def test_dashboard_endpoint():
