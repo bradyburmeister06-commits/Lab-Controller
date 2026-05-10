@@ -45,6 +45,13 @@ Use Docker if you want to avoid installing Python packages on the host:
 docker compose up -d --build
 ```
 
+This default `docker-compose.yml` runs the backend in **all-in-one** mode
+(dashboards + simulated sensors + mock relays) on a single machine and is
+unchanged. If you instead want to run the website on one computer and the
+hardware automation on another, see
+[Two-machine Docker deployment](#two-machine-docker-deployment) below — it
+uses `docker-compose.hub.yml` and `docker-compose.collector.yml`.
+
 Open:
 
 - Public read-only dashboard: `http://localhost:8000/` or `http://localhost:8000/public`
@@ -1098,6 +1105,273 @@ curl -u admin:change-me-now http://localhost:8000/api/relays-controller
 - `mcculw` is Windows-only and imported lazily; the backend imports cleanly and runs in `mock` mode on Linux/macOS/Docker even when `mcculw` is not installed.
 - If `mcculw` import or `d_config_port` fails at startup the app still boots, logs a warning, and relay writes will return a hardware error instead of crashing the server.
 - `RELAY_ACTIVE_HIGH=false` flips the on/off semantics for boards whose inputs are active-low.
+
+## Two-machine Docker deployment
+
+This is the easiest split-mode setup: each computer runs a single Docker
+container. The **hub** container hosts the website and SQLite database.
+The **collector** container drives the lab automation code and pushes
+data to the hub over HTTP (typically through Tailscale).
+
+```
++-----------------------------+              +------------------------------+
+|  HOME / SERVER computer     |  HTTP push   |  LAB / AUTOMATION computer   |
+|  docker-compose.hub.yml     |  <---------  |  docker-compose.collector.yml|
+|  APP_MODE=hub               |   Tailscale  |  APP_MODE=collector          |
+|  Web UI + SQLite at /data   |              |  Arduino + automation code   |
+|  Port 8000 published        |              |  No public port published    |
++-----------------------------+              +------------------------------+
+```
+
+The collector only needs **outbound** access to the hub. You do not need
+to expose the lab computer to inbound traffic.
+
+> **Windows + MCC USB-1208FS-Plus relay hardware:** Docker on Windows runs
+> Linux containers, and the MCC Universal Library / `mcculw` is
+> Windows-only. USB and driver passthrough into Linux containers on
+> Windows Docker Desktop is not reliably supported, so a Dockerized
+> collector on Windows is only suitable for `RELAY_CONTROLLER=mock` or
+> network-only collectors. **For real MCC relay hardware, run the
+> collector natively on Windows** — see
+> [Windows-native collector for real MCC hardware](#windows-native-collector-for-real-mcc-hardware)
+> below.
+
+### Files
+
+| File                            | Where it runs               | Purpose                              |
+|---------------------------------|-----------------------------|--------------------------------------|
+| `docker-compose.yml`            | one machine                 | All-in-one (default, unchanged)      |
+| `docker-compose.hub.yml`        | home/server computer        | Hub container only                   |
+| `docker-compose.collector.yml`  | lab/automation computer     | Collector container only             |
+| `.env.hub.example`              | home/server computer        | Template — copy to `.env` on the hub |
+| `.env.collector.example`        | lab/automation computer     | Template — copy to `.env` on collector |
+
+### A. Home / server computer (hub container)
+
+1. Install Docker (Docker Desktop on Windows/macOS, or `docker.io` on Linux)
+   and Tailscale. Note the Tailscale IP (e.g. `100.64.1.10`) or DNS name
+   (e.g. `lab-hub.tailnet-name.ts.net`) of this computer.
+2. Clone the repo and create the hub's `.env`:
+
+   ```bash
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   cp .env.hub.example .env
+   ```
+
+3. Edit `.env` on the hub machine. At minimum change:
+
+   ```dotenv
+   ADMIN_PASSWORD=use-a-real-password
+   COLLECTOR_API_TOKEN=generate-a-long-random-secret
+   ```
+
+   Generate a token with:
+
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+4. Build and start:
+
+   ```bash
+   docker compose -f docker-compose.hub.yml up -d --build
+   ```
+
+5. Verify locally:
+
+   ```bash
+   curl -i http://localhost:8000/api/health
+   ```
+
+   Open `http://localhost:8000/` (public) and `http://localhost:8000/admin`
+   (sysadmin login). On Tailscale, the same hub is reachable at
+   `http://HOME_TAILSCALE_IP:8000/` from any tailnet device.
+
+### B. Lab / automation computer (collector container)
+
+Use this when the lab machine is Linux, OR when you only need a
+mock/network-only collector on Windows. **For real MCC relays on
+Windows, skip this and use
+[Windows-native collector for real MCC hardware](#windows-native-collector-for-real-mcc-hardware).**
+
+1. Install Docker and Tailscale on the lab machine and join the same
+   tailnet as the hub.
+2. Clone the repo and create the collector's `.env`:
+
+   ```bash
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   cp .env.collector.example .env
+   ```
+
+3. Edit `.env` on the collector machine. At minimum:
+
+   ```dotenv
+   # Use the hub's Tailscale IP or DNS name. Both work:
+   HUB_BASE_URL=http://100.64.1.10:8000
+   # HUB_BASE_URL=http://lab-hub.tailnet-name.ts.net:8000
+
+   # MUST match what you set on the hub.
+   COLLECTOR_API_TOKEN=generate-a-long-random-secret
+
+   COLLECTOR_ID=collector-1
+   COLLECTOR_NAME="Lab Collector"
+   ```
+
+   To start in mock mode (verifies hub<->collector wiring without
+   hardware), keep `SENSOR_SIMULATOR=true` and `RELAY_CONTROLLER=mock`.
+
+4. (Linux + real Arduino) Edit `docker-compose.collector.yml` and
+   uncomment the `devices:` block, e.g.:
+
+   ```yaml
+       devices:
+         - "/dev/ttyACM0:/dev/ttyACM0"
+         - "/dev/ttyACM1:/dev/ttyACM1"
+   ```
+
+   Confirm the host paths first with `ls /dev/ttyACM*`. Then in the
+   collector's `.env` set `SENSOR_SIMULATOR=false` and adjust
+   `ARDUINO_1_PORT` / `ARDUINO_2_PORT` to those `/dev/ttyACM*` names.
+
+   On Windows Docker Desktop, mounting a host `COM3` device into a
+   Linux container is not supported. Run the Windows-native collector
+   instead.
+
+5. Build and start:
+
+   ```bash
+   docker compose -f docker-compose.collector.yml up -d --build
+   ```
+
+6. Tail the collector log to confirm it is reaching the hub:
+
+   ```bash
+   docker logs -f machine-research-collector
+   ```
+
+   On startup you should see push/poll log lines and no `401` or
+   connection-refused errors.
+
+### C. Test connectivity from the collector machine to the hub
+
+Run these from the lab/collector computer. Replace the IP, DNS name, and
+token with your real values.
+
+```bash
+# Hub is reachable on Tailscale?
+curl -i http://HOME_TAILSCALE_IP:8000/api/health
+# or
+curl -i http://lab-hub.tailnet-name.ts.net:8000/api/health
+
+# Token works end-to-end?
+curl -i \
+  -H "X-Collector-Token: generate-a-long-random-secret" \
+  -H "Content-Type: application/json" \
+  -X POST http://HOME_TAILSCALE_IP:8000/api/collector/heartbeat \
+  -d '{"collector_id":"collector-1","name":"Lab Collector","mode":"collector"}'
+```
+
+A `200 OK` from both means Tailscale, the hub, and the shared token are
+working. A `401` means `COLLECTOR_API_TOKEN` doesn't match between the
+two `.env` files.
+
+### D. See the collector online in the admin UI
+
+On the hub machine, open `http://localhost:8000/admin` (or
+`http://HOME_TAILSCALE_IP:8000/admin` from another tailnet device) and
+sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The **Collector
+status** panel should show `collector-1` with a recent heartbeat
+timestamp. If it says `stale` or is missing, the collector has not
+successfully heartbeated in the last ~60 seconds — check the collector
+container's log.
+
+### E. Updating, stopping, restarting
+
+```bash
+# On the hub machine
+docker compose -f docker-compose.hub.yml restart
+docker compose -f docker-compose.hub.yml down
+docker compose -f docker-compose.hub.yml up -d --build
+
+# On the collector machine
+docker compose -f docker-compose.collector.yml restart
+docker compose -f docker-compose.collector.yml down
+docker compose -f docker-compose.collector.yml up -d --build
+```
+
+The hub's SQLite database lives in the named volume
+`machine_research_hub_data` and survives `down`/rebuilds. The collector's
+small local buffer lives in `machine_research_collector_data`.
+
+### Windows-native collector for real MCC hardware
+
+Use this path when the lab computer is Windows AND you need real MCC
+USB-1208FS-Plus relay control. Docker is **not** used on the collector
+side here — the hub computer can still run inside Docker.
+
+1. On the lab Windows machine, install Python 3.11+, MCC InstaCal, and
+   join the tailnet. From `cmd.exe`:
+
+   ```bat
+   git clone https://github.com/bradyburmeister06-commits/Lab-Controller.git
+   cd Lab-Controller
+   copy .env.collector.example .env
+   python -m venv .venv
+   .venv\Scripts\activate
+   pip install -r requirements.txt
+   pip install -r requirements-windows.txt
+   ```
+
+2. Edit `.env` on the Windows machine:
+
+   ```dotenv
+   APP_MODE=collector
+   HUB_BASE_URL=http://HOME_TAILSCALE_IP:8000
+   COLLECTOR_API_TOKEN=generate-a-long-random-secret
+   COLLECTOR_ID=collector-1
+   COLLECTOR_NAME="Lab Collector"
+
+   RELAY_CONTROLLER=mcc_usb1208fs_plus
+   MCC_BOARD_NUM=0
+   MCC_DIGITAL_PORT=FIRSTPORTB
+   RELAY_1_BIT=0
+   RELAY_2_BIT=1
+   RELAY_3_BIT=2
+   RELAY_ACTIVE_HIGH=true
+
+   SENSOR_SIMULATOR=false
+   ARDUINO_1_PORT=COM3
+   ARDUINO_2_PORT=COM4
+   ARDUINO_BAUDRATE=9600
+   ```
+
+3. Run it:
+
+   ```bat
+   .venv\Scripts\activate
+   uvicorn app.main:app --host 127.0.0.1 --port 8001
+   ```
+
+   (Optional) install as a Windows service with NSSM — see the
+   [Two-computer (hub + collector) deployment over Tailscale](#two-computer-hub--collector-deployment-over-tailscale)
+   section below for the exact NSSM commands.
+
+4. Confirm the collector appears under **Collector status** on the hub's
+   `/admin` page.
+
+### Which `.env` to edit on which machine
+
+- On the **hub** computer: edit `.env` in the project folder. It was
+  created from `.env.hub.example`. Hub-only settings live here
+  (`ADMIN_PASSWORD`, `COLLECTOR_API_TOKEN`, etc.).
+- On the **collector** computer: edit `.env` in the project folder there.
+  It was created from `.env.collector.example`. Collector-only settings
+  live here (`HUB_BASE_URL`, hardware ports, MCC settings, etc.).
+- The `COLLECTOR_API_TOKEN` value in the two files MUST match exactly.
+- The all-in-one `.env.example` is still used by `docker-compose.yml` for
+  the single-machine default.
 
 ## Two-computer (hub + collector) deployment over Tailscale
 

@@ -1,0 +1,39 @@
+# Hub-only deployment.
+#
+# Run on the HOME / SERVER computer. Serves the public dashboard, sysadmin
+# dashboard, and the collector ingest API. Stores SQLite data in a named
+# volume. Does NOT touch any local hardware.
+#
+# Usage:
+#   1. cp .env.hub.example .env   # then edit ADMIN_PASSWORD + COLLECTOR_API_TOKEN
+#   2. docker compose -f docker-compose.hub.yml up -d --build
+#   3. Open http://localhost:8000/  and  http://localhost:8000/admin
+#
+# When you upgrade:
+#   docker compose -f docker-compose.hub.yml pull
+#   docker compose -f docker-compose.hub.yml up -d --build
+
+services:
+  hub:
+    build: .
+    image: machine-research-backend:latest
+    container_name: machine-research-hub
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - machine_research_hub_data:/data
+    env_file:
+      - .env
+    environment:
+      # Hard-pin hub mode regardless of what is in .env so this compose file
+      # always behaves as the hub.
+      APP_MODE: hub
+      DATABASE_URL: sqlite:////data/machine_research.db
+      # Hub never drives hardware.
+      MACHINE_CONTROLLER: mock
+      SENSOR_SIMULATOR: "true"
+      RELAY_CONTROLLER: mock
+
+volumes:
+  machine_research_hub_data:

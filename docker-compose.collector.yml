@@ -1,0 +1,54 @@
+# Collector-only deployment.
+#
+# Run on the LAB / AUTOMATION computer. Pushes Arduino sensor data and relay
+# events to the hub at HUB_BASE_URL. Does NOT serve a public dashboard — use
+# the hub for that.
+#
+# Usage:
+#   1. cp .env.collector.example .env
+#   2. Edit .env so HUB_BASE_URL points at your hub's Tailscale URL or IP
+#      and COLLECTOR_API_TOKEN matches the hub's value.
+#   3. docker compose -f docker-compose.collector.yml up -d --build
+#
+# IMPORTANT — Windows + MCC USB-1208FS-Plus relays
+# ------------------------------------------------
+# The MCC Universal Library (mcculw) is a Windows-only driver. A Linux
+# container on Windows Docker Desktop CANNOT reach it, and USB passthrough
+# of the device into the container is not reliably supported. If you need
+# real relay control on Windows, do NOT use this compose file: run the
+# Windows-native collector path documented in the README instead. Use this
+# compose file when:
+#   - the collector machine is Linux and the hardware is reachable as a
+#     /dev/ttyACM* serial port (Arduino), OR
+#   - you only need a "mock" / network-only collector for testing.
+#
+# Linux + Arduino: uncomment the `devices:` block and adjust the host paths
+# to match what `ls /dev/ttyACM*` shows.
+
+services:
+  collector:
+    build: .
+    image: machine-research-backend:latest
+    container_name: machine-research-collector
+    restart: unless-stopped
+    # Only exposed locally for the /api/health probe. The collector pushes
+    # to the hub; it does not need to receive inbound traffic from the hub.
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - machine_research_collector_data:/data
+    env_file:
+      - .env
+    environment:
+      APP_MODE: collector
+      DATABASE_URL: sqlite:////data/machine_research.db
+      # Linux Docker cannot load the Windows-only MCC driver. Force mock
+      # so the collector boots cleanly even if the .env file says otherwise.
+      RELAY_CONTROLLER: mock
+    # Linux + real Arduino: uncomment and adjust to your /dev paths.
+    # devices:
+    #   - "/dev/ttyACM0:/dev/ttyACM0"
+    #   - "/dev/ttyACM1:/dev/ttyACM1"
+
+volumes:
+  machine_research_collector_data:
