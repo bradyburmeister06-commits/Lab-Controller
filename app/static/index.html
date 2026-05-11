@@ -672,9 +672,9 @@
                   ${r.description ? `<span>Notes</span><strong>${escapeHtml(r.description)}</strong>` : ""}
                 </div>
                 <div class="actions" style="margin-top:0;">
-                  <button type="button" data-relay-on="${escapeHtml(r.id)}" ${r.enabled ? "" : "disabled"}>Turn ON</button>
-                  <button type="button" class="secondary" data-relay-off="${escapeHtml(r.id)}">Turn OFF</button>
-                  <button type="button" class="secondary" data-relay-toggle="${escapeHtml(r.id)}" ${r.enabled ? "" : "disabled"}>Toggle</button>
+                  <button type="button" data-relay-on="${escapeHtml(r.id)}" ${(r.enabled && selectedCollectorKey) ? "" : "disabled"}>Turn ON</button>
+                  <button type="button" class="secondary" data-relay-off="${escapeHtml(r.id)}" ${selectedCollectorKey ? "" : "disabled"}>Turn OFF</button>
+                  <button type="button" class="secondary" data-relay-toggle="${escapeHtml(r.id)}" ${(r.enabled && selectedCollectorKey) ? "" : "disabled"}>Toggle</button>
                 </div>
                 <details>
                   <summary style="cursor:pointer;color:var(--muted);font-size:13px;">Edit metadata</summary>
@@ -713,7 +713,7 @@
                         </select>
                       </label>
                       <div class="actions full" style="margin-top:0;">
-                        <button type="submit">Save schedule</button>
+                        <button type="submit" ${selectedCollectorKey ? "" : "disabled"}>Save schedule</button>
                       </div>
                     </form>
                   </details>
@@ -1132,7 +1132,7 @@
           selectedCollectorKey = "";
           selector.innerHTML = '<option value="">No collectors online</option>';
           selector.disabled = true;
-          hint.textContent = "No collector selected";
+          hint.textContent = "No collector selected (relay controls disabled)";
           return;
         }
         if (!selectedCollectorKey || !deduped.includes(selectedCollectorKey)) {
