@@ -179,6 +179,13 @@ The four scripts in the repo root drive the entire lifecycle:
    COLLECTOR_ID=lab-mcc-controller
    COLLECTOR_NAME=Lab MCC Controller
    RELAY_CONTROLLER=mcc_usb1208fs_plus
+   MCC_BOARD_NUM=0
+   MCC_DIGITAL_PORT=FIRSTPORTA
+   RELAY_1_BIT=0
+   RELAY_2_BIT=1
+   RELAY_3_BIT=2
+   RELAY_ACTIVE_HIGH=true
+   MACHINE_CONTROLLER=mock
    SENSOR_SIMULATOR=false
    ARDUINO_1_PORT=COM3
    ARDUINO_2_PORT=COM4
@@ -223,6 +230,19 @@ To restart in one go:
 ```bat
 stop-collector.bat && start-collector.bat
 ```
+
+### Hub + collector split deployment (important)
+
+- **Hub (Mac/Docker)** hosts dashboard/API and queues commands.
+- **Collector (Windows/native Python)** physically controls MCC relay outputs.
+- For remote relay control via hub, requests must target the collector machine key:
+
+```http
+POST /api/relays/relay-1/on?machine_key=lab-mcc-controller
+POST /api/relays/relay-1/off?machine_key=lab-mcc-controller
+```
+
+The admin dashboard now includes the selected collector automatically in relay and schedule calls.
 
 #### Make the collector start automatically on boot/login (Task Scheduler)
 
@@ -1916,4 +1936,3 @@ curl -H "X-Collector-Token: $TOKEN" \
   default to the local collector's machine_key for backward compat.
 - The public dashboard remains read-only and shows multi-machine cards
   on `/public` and `/api/public/dashboard`.
-

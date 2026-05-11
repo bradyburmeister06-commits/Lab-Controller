@@ -414,7 +414,12 @@
       </section>
 
       <section class="card">
-        <h2>Local Relay Control (this machine)</h2>
+        <h2>Relay Control (selected collector)</h2>
+        <div class="actions" style="margin-bottom:10px;">
+          <label for="collectorSelector">Target collector</label>
+          <select id="collectorSelector"></select>
+          <span id="collectorSelectionHint" class="status-pill">No collector selected</span>
+        </div>
         <div id="relayControllerInfo" class="relay-controller-info">
           <div class="note">Loading relay controller status...</div>
         </div>
@@ -447,6 +452,7 @@
       const api = (path) => path;
       let sensorChart;
       let currentMachineId = "machine-1";
+      let selectedCollectorKey = "";
 
       function fmtDate(value) {
         if (!value) return "None";
@@ -733,17 +739,17 @@
 
         target.querySelectorAll("[data-relay-on]").forEach((btn) =>
           btn.addEventListener("click", () =>
-            wrapAction(`Turn ${btn.dataset.relayOn} ON`, () => postJson(`/api/relays/${btn.dataset.relayOn}/on`)),
+            wrapAction(`Turn ${btn.dataset.relayOn} ON`, () => postJson(appendMachineKey(`/api/relays/${btn.dataset.relayOn}/on`))),
           ),
         );
         target.querySelectorAll("[data-relay-off]").forEach((btn) =>
           btn.addEventListener("click", () =>
-            wrapAction(`Turn ${btn.dataset.relayOff} OFF`, () => postJson(`/api/relays/${btn.dataset.relayOff}/off`)),
+            wrapAction(`Turn ${btn.dataset.relayOff} OFF`, () => postJson(appendMachineKey(`/api/relays/${btn.dataset.relayOff}/off`))),
           ),
         );
         target.querySelectorAll("[data-relay-toggle]").forEach((btn) =>
           btn.addEventListener("click", () =>
-            wrapAction(`Toggle ${btn.dataset.relayToggle}`, () => postJson(`/api/relays/${btn.dataset.relayToggle}/toggle`)),
+            wrapAction(`Toggle ${btn.dataset.relayToggle}`, () => postJson(appendMachineKey(`/api/relays/${btn.dataset.relayToggle}/toggle`))),
           ),
         );
         target.querySelectorAll("[data-relay-form]").forEach((form) =>
@@ -770,7 +776,7 @@
               on_duration_seconds: Number(fd.get("on_duration_seconds")),
               off_duration_seconds: Number(fd.get("off_duration_seconds")),
             };
-            await wrapAction(`Save schedule for ${relayId}`, () => patchJson(`/api/relays/${relayId}/schedule`, body));
+            await wrapAction(`Save schedule for ${relayId}`, () => patchJson(appendMachineKey(`/api/relays/${relayId}/schedule`), body));
           }),
         );
       }
@@ -972,28 +978,25 @@
 
       async function refreshAll() {
         const hours = document.getElementById("historyWindow").value;
-        const [health, dashboard, readings, activations, machines, relays, relayController, relaySchedules, relayEvents, logs, summary, collectors] = await Promise.all([
+        const [health, dashboard, readings, activations, machines, relays, collectors] = await Promise.all([
           getJson("/api/health"),
           getJson("/api/dashboard"),
           getJson(`/api/sensors/readings?hours=${hours}&limit=5000`),
           getJson("/api/activations?limit=1000"),
           getJson("/api/machines"),
           getJson("/api/relays"),
-          getJson("/api/relays-controller").catch((err) => {
-            console.warn("Could not load relay controller info", err);
-            return null;
-          }),
-          getJson("/api/relay-schedules").catch((err) => {
-            console.warn("Could not load relay schedules", err);
-            return [];
-          }),
-          getJson("/api/relay-events?limit=500"),
-          getJson("/api/logs?limit=1000"),
-          getJson("/api/data/summary"),
           getJson("/api/collectors").catch((err) => {
             console.warn("Could not load collectors", err);
             return [];
           }),
+        ]);
+        updateCollectorSelection(collectors);
+        const [relayController, relaySchedules, relayEvents, logs, summary] = await Promise.all([
+          getJson(appendMachineKey("/api/relays-controller")).catch(() => null),
+          getJson(appendMachineKey("/api/relay-schedules")).catch(() => []),
+          getJson(appendMachineKey("/api/relay-events?limit=500")),
+          getJson("/api/logs?limit=1000"),
+          getJson("/api/data/summary"),
         ]);
         renderCollectorStatus(collectors);
         renderMachineSchedules(collectors, relays);
@@ -1079,6 +1082,10 @@
 
       document.getElementById("refreshButton").addEventListener("click", refreshAll);
       document.getElementById("historyWindow").addEventListener("change", refreshAll);
+      document.getElementById("collectorSelector").addEventListener("change", (e) => {
+        selectedCollectorKey = e.target.value || "";
+        refreshAll().catch(console.error);
+      });
       document.getElementById("triggerButton").addEventListener("click", async () => {
         await getJson(`/api/machines/${currentMachineId}/trigger`, { method: "POST" });
         await refreshAll();
@@ -1110,3 +1117,30 @@
     </script>
   </body>
 </html>
+      function appendMachineKey(path) {
+        if (!selectedCollectorKey) return path;
+        const join = path.includes("?") ? "&" : "?";
+        return `${path}${join}machine_key=${encodeURIComponent(selectedCollectorKey)}`;
+      }
+
+      function updateCollectorSelection(collectors) {
+        const selector = document.getElementById("collectorSelector");
+        const hint = document.getElementById("collectorSelectionHint");
+        const options = (collectors || []).map((c) => c.machine_key || c.id).filter(Boolean);
+        const deduped = [...new Set(options)];
+        if (!deduped.length) {
+          selectedCollectorKey = "";
+          selector.innerHTML = '<option value="">No collectors online</option>';
+          selector.disabled = true;
+          hint.textContent = "No collector selected";
+          return;
+        }
+        if (!selectedCollectorKey || !deduped.includes(selectedCollectorKey)) {
+          selectedCollectorKey = deduped[0];
+        }
+        selector.disabled = false;
+        selector.innerHTML = deduped
+          .map((k) => `<option value="${escapeHtml(k)}" ${k === selectedCollectorKey ? "selected" : ""}>${escapeHtml(k)}</option>`)
+          .join("");
+        hint.textContent = `Target: ${selectedCollectorKey}`;
+      }

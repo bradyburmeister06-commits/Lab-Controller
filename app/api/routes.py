@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from statistics import mean
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -59,6 +60,7 @@ from app.services.relay_service import apply_state, list_relays, relay_history, 
 from app.services.sensor_service import latest_by_sensor, recent_readings
 
 router = APIRouter()
+relay_logger = logging.getLogger("app.relay")
 
 
 def _client_ip(request: Request | None) -> str | None:
@@ -450,6 +452,10 @@ def _enqueue_relay_set(db: Session, collector_id: str, relay_id: str, on: bool) 
         relay_id=relay_id,
         payload="on" if on else "off",
     )
+    relay_logger.info(
+        "queued relay command type=relay_set relay_id=%s target_collector=%s payload=%s",
+        relay_id, collector_id, "on" if on else "off",
+    )
     return relay
 
 
@@ -541,6 +547,10 @@ def admin_relay_toggle(
                 collector_id=target_collector,
                 command_type="relay_toggle",
                 relay_id=relay_id,
+            )
+            relay_logger.info(
+                "queued relay command type=relay_toggle relay_id=%s target_collector=%s",
+                relay_id, target_collector,
             )
             return serialize_relay(relay)
         raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
@@ -775,14 +785,15 @@ def admin_relay_controller_info(
             initialized = bool(collector.relay_controller_initialized)
             if collector.relay_controller_mode:
                 mode = collector.relay_controller_mode
+    is_remote = machine_key is not None and (settings.app_mode == "hub" or target_id != settings.collector_id)
     return RelayControllerInfoOut(
         mode=mode,
         active_high=settings.relay_active_high,
-        board_num=settings.mcc_board_num,
-        digital_port=settings.mcc_digital_port,
-        bit_map=settings.relay_bit_map,
+        board_num=-1 if is_remote else settings.mcc_board_num,
+        digital_port="REMOTE_MANAGED" if is_remote else settings.mcc_digital_port,
+        bit_map={} if is_remote else settings.relay_bit_map,
         initialized=initialized,
-        latch=latch,
+        latch=0 if is_remote else latch,
     )
 
 

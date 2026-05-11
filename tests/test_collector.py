@@ -263,6 +263,31 @@ def test_hub_mode_admin_relay_set_enqueues_command():
         main_mod.relay_controller = saved_module_controller
 
 
+def test_hub_mode_admin_relay_set_with_machine_key_targets_selected_collector():
+    import app.main as main_mod
+    settings = get_settings()
+    saved_mode = settings.app_mode
+    saved_collector_id = settings.collector_id
+    saved_module_controller = main_mod.relay_controller
+    settings.app_mode = "hub"  # type: ignore[misc]
+    settings.collector_id = "hub-default-collector"  # type: ignore[misc]
+    main_mod.relay_controller = None
+    try:
+        with SessionLocal() as db:
+            db.query(CollectorCommand).filter(CollectorCommand.collector_id == "lab-mcc-controller").delete()
+            db.commit()
+        with TestClient(main_mod.app) as client:
+            r = client.post("/api/relays/relay-1/on?machine_key=lab-mcc-controller", auth=ADMIN_AUTH)
+            assert r.status_code == 200, r.text
+        with SessionLocal() as db:
+            pending = db.query(CollectorCommand).filter(CollectorCommand.collector_id == "lab-mcc-controller").all()
+            assert any(c.command_type == "relay_set" and c.payload == "on" for c in pending)
+    finally:
+        settings.app_mode = saved_mode  # type: ignore[misc]
+        settings.collector_id = saved_collector_id  # type: ignore[misc]
+        main_mod.relay_controller = saved_module_controller
+
+
 def test_hub_mode_relay_controller_info_uses_collector_status():
     """When the hub has no local controller, the controller-info endpoint
     should fall back to the last-reported collector status."""
@@ -293,6 +318,11 @@ def test_hub_mode_relay_controller_info_uses_collector_status():
             info = r.json()
             assert info["mode"] == "mcc_usb1208fs_plus"
             assert info["initialized"] is True
+            r = client.get("/api/relays-controller?machine_key=hub-info-collector", auth=ADMIN_AUTH)
+            assert r.status_code == 200
+            info = r.json()
+            assert info["digital_port"] == "REMOTE_MANAGED"
+            assert info["board_num"] == -1
     finally:
         settings.app_mode = saved_mode  # type: ignore[misc]
         settings.collector_id = saved_collector_id  # type: ignore[misc]

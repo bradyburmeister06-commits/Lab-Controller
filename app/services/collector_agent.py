@@ -316,17 +316,37 @@ class CollectorAgent:
             with SessionLocal() as db:
                 if ctype == "relay_set" and relay_id:
                     on = (payload == "on")
-                    apply_state(
+                    relay, event = apply_state(
                         db, relay_id, on, self.controller,
                         action="set", trigger_source="hub",
                         machine_key=self.settings.collector_id,
                     )
+                    logger.info(
+                        "collector apply command id=%s type=%s relay_id=%s payload=%s board=%s port=%s bit=%s success=%s msg=%s",
+                        cmd.get("id"), ctype, relay_id, payload,
+                        getattr(self.settings, "mcc_board_num", None),
+                        getattr(self.settings, "mcc_digital_port", None),
+                        getattr(self.settings, "relay_bit_map", {}).get(relay_id),
+                        bool(event.success), event.message,
+                    )
+                    if not event.success:
+                        return False, event.message
                     return True, f"set {relay_id} {'on' if on else 'off'}"
                 if ctype == "relay_toggle" and relay_id:
-                    toggle_relay(
+                    relay, event = toggle_relay(
                         db, relay_id, self.controller,
                         trigger_source="hub", machine_key=self.settings.collector_id,
                     )
+                    logger.info(
+                        "collector apply command id=%s type=%s relay_id=%s payload=%s board=%s port=%s bit=%s success=%s msg=%s",
+                        cmd.get("id"), ctype, relay_id, payload,
+                        getattr(self.settings, "mcc_board_num", None),
+                        getattr(self.settings, "mcc_digital_port", None),
+                        getattr(self.settings, "relay_bit_map", {}).get(relay_id),
+                        bool(event.success), event.message,
+                    )
+                    if not event.success:
+                        return False, event.message
                     return True, f"toggled {relay_id}"
                 if ctype == "schedule_changed":
                     # No-op here — schedules were already synced above.
