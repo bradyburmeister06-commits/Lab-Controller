@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 from app.config import Settings
 
@@ -117,6 +118,66 @@ class MccUsb1208FsPlusRelayController(RelayController):
         self._mcculw_dio.d_out(self.board_num, self._port_type, int(value) & 0xFF)
 
 
+class ArduinoSerialRelayController(RelayController):
+    """Drive relays over an Arduino serial protocol."""
+
+    def __init__(
+        self,
+        bit_map: dict[str, int],
+        active_high: bool = True,
+        primary_port: str = "/dev/ttyACM0",
+        secondary_port: str | None = None,
+        baud_rate: int = 115200,
+        timeout_seconds: float = 2.0,
+    ) -> None:
+        super().__init__(bit_map, active_high)
+        self.primary_port = primary_port
+        self.secondary_port = secondary_port
+        self.baud_rate = baud_rate
+        self.timeout_seconds = timeout_seconds
+        self._serial: Any = None
+        self._configured = False
+        self._connected_port: str | None = None
+
+    def initialize(self) -> None:
+        try:
+            import serial  # type: ignore[import-not-found]
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("pyserial is required for arduino_serial mode.") from exc
+        candidate_ports = [self.primary_port]
+        if self.secondary_port:
+            candidate_ports.append(self.secondary_port)
+        last_error: Exception | None = None
+        for port in candidate_ports:
+            try:
+                conn = serial.Serial(port, self.baud_rate, timeout=self.timeout_seconds)
+                self._serial = conn
+                self._connected_port = port
+                self._configured = True
+                self._write_line("ALL_OFF")
+                self._latch = 0x00 if self.active_high else 0xFF
+                return
+            except Exception as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"Unable to connect to Arduino on ports: {candidate_ports}. Last error: {last_error}")
+
+    @property
+    def connected_port(self) -> str | None:
+        return self._connected_port
+
+    def _write_line(self, command: str) -> None:
+        if self._serial is None:
+            raise RuntimeError("Arduino serial not initialized.")
+        self._serial.write((command.strip() + "\n").encode("utf-8"))
+        self._serial.flush()
+
+    def _write_byte(self, value: int) -> None:
+        if not self._configured:  # pragma: no cover
+            raise RuntimeError("Arduino controller not initialized; call initialize() first.")
+        self._write_line(f"SET RELAY_BYTE {int(value) & 0xFF}")
+
+
 def build_relay_controller(settings: Settings) -> RelayController:
     if settings.relay_controller == "mcc_usb1208fs_plus":
         controller: RelayController = MccUsb1208FsPlusRelayController(
@@ -124,6 +185,15 @@ def build_relay_controller(settings: Settings) -> RelayController:
             active_high=settings.relay_active_high,
             board_num=settings.mcc_board_num,
             digital_port=settings.mcc_digital_port,
+        )
+    elif settings.relay_controller == "arduino_serial":
+        controller = ArduinoSerialRelayController(
+            bit_map=settings.relay_bit_map,
+            active_high=settings.relay_active_high,
+            primary_port=settings.arduino_1_port,
+            secondary_port=settings.arduino_2_port,
+            baud_rate=settings.arduino_baud_rate,
+            timeout_seconds=settings.arduino_command_timeout_seconds,
         )
     else:
         controller = MockRelayController(

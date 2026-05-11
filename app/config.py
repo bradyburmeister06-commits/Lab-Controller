@@ -73,10 +73,14 @@ class Settings(BaseSettings):
     arduino_1_name: str = "arduino-1"
     arduino_2_port: str = "/dev/ttyACM1"
     arduino_2_name: str = "arduino-2"
-    arduino_baudrate: int = 9600
+    arduino_baud_rate: int = Field(default=115200, alias="arduino_baudrate")
     sensor_read_timeout_seconds: float = 2.0
 
-    relay_controller: Literal["mock", "mcc_usb1208fs_plus"] = "mock"
+    relay_controller: Literal["mock", "mcc_usb1208fs_plus", "arduino_serial"] = "mock"
+    arduino_command_timeout_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
+    max_temp_c: float = 90.0
+    max_rh_percent: float = 95.0
+    manual_test_max_seconds: int = Field(default=60, ge=1, le=3600)
     mcc_board_num: int = 0
     mcc_digital_port: str = "FIRSTPORTB"
     relay_1_bit: int = Field(default=0, ge=0, le=7)

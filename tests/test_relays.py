@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
+import sys
 
 from app.main import app
 from app.services.relay_controller import (
+    ArduinoSerialRelayController,
     MockRelayController,
     build_relay_controller,
 )
@@ -62,6 +64,61 @@ def test_public_relays_endpoint_returns_three_defaults():
             assert "bit_index" in r
 
 
+def test_build_relay_controller_supports_arduino_mode():
+    settings = Settings(relay_controller="arduino_serial")
+    ctrl = build_relay_controller(settings)
+    assert isinstance(ctrl, ArduinoSerialRelayController)
+
+
+def test_arduino_controller_initializes_primary_port(monkeypatch):
+    writes: list[bytes] = []
+
+    class FakeSerialConn:
+        def write(self, data: bytes) -> None:
+            writes.append(data)
+
+        def flush(self) -> None:
+            return None
+
+    class FakeSerialModule:
+        @staticmethod
+        def Serial(port, baud_rate, timeout):
+            assert port == "COM9"
+            assert baud_rate == 115200
+            assert timeout == 2.0
+            return FakeSerialConn()
+
+    monkeypatch.setitem(sys.modules, "serial", FakeSerialModule)
+    ctrl = ArduinoSerialRelayController({"relay-1": 0}, primary_port="COM9", baud_rate=115200, timeout_seconds=2.0)
+    ctrl.initialize()
+    assert ctrl.connected_port == "COM9"
+    assert writes == [b"ALL_OFF\n"]
+
+
+def test_arduino_controller_falls_back_to_secondary_port(monkeypatch):
+    class FakeSerialConn:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def flush(self) -> None:
+            return None
+
+    class FakeSerialModule:
+        @staticmethod
+        def Serial(port, _baud_rate, timeout):
+            if port == "COM1":
+                raise OSError("port busy")
+            if port == "COM2":
+                assert timeout == 2.0
+                return FakeSerialConn()
+            raise AssertionError("unexpected port")
+
+    monkeypatch.setitem(sys.modules, "serial", FakeSerialModule)
+    ctrl = ArduinoSerialRelayController({"relay-1": 0}, primary_port="COM1", secondary_port="COM2")
+    ctrl.initialize()
+    assert ctrl.connected_port == "COM2"
+
+
 def test_admin_relay_controls_set_on_off_toggle_and_history():
     with TestClient(app) as client:
         # Auth required
@@ -110,6 +167,22 @@ def test_admin_relay_unknown_id_returns_404():
     with TestClient(app) as client:
         r = client.post("/api/relays/relay-99/on", auth=ADMIN_AUTH)
         assert r.status_code == 404
+
+
+def test_admin_relay_hardware_write_failure_returns_502():
+    class FailingRelayController(MockRelayController):
+        def _write_byte(self, value: int) -> None:
+            raise RuntimeError("simulated write failure")
+
+    with TestClient(app) as client:
+        original = app.state.relay_controller
+        app.state.relay_controller = FailingRelayController({"relay-1": 0, "relay-2": 1, "relay-3": 2})
+        try:
+            r = client.post("/api/relays/relay-1/on", auth=ADMIN_AUTH)
+            assert r.status_code == 502
+            assert "Hardware write failed" in r.text
+        finally:
+            app.state.relay_controller = original
 
 
 def test_dashboard_includes_relays():
@@ -192,7 +265,7 @@ def test_admin_relay_controller_info_endpoint():
         r = client.get("/api/relays-controller", auth=ADMIN_AUTH)
         assert r.status_code == 200
         info = r.json()
-        assert info["mode"] in {"mock", "mcc_usb1208fs_plus"}
+        assert info["mode"] in {"mock", "mcc_usb1208fs_plus", "arduino_serial"}
         assert isinstance(info["active_high"], bool)
         assert info["digital_port"]
         assert isinstance(info["bit_map"], dict)

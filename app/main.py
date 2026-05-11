@@ -40,7 +40,7 @@ if settings.runs_local_hardware:
             SensorDevice(settings.arduino_1_name, settings.arduino_1_port),
             SensorDevice(settings.arduino_2_name, settings.arduino_2_port),
         ],
-        baudrate=settings.arduino_baudrate,
+        baudrate=settings.arduino_baud_rate,
         timeout_seconds=settings.sensor_read_timeout_seconds,
         simulator=settings.sensor_simulator,
         machine_key=settings.collector_id,

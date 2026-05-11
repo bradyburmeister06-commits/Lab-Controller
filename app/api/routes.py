@@ -460,6 +460,13 @@ def _resolve_target_collector_id(payload_machine_key: str | None) -> str:
     return settings.collector_id
 
 
+def _raise_if_hardware_write_failed(event: RelayEvent) -> None:
+    # Keep disabled-relay policy as a 200 (intentional no-op), but surface
+    # real hardware write failures so the dashboard/operator can act.
+    if not bool(event.success) and (event.message or "").startswith("Hardware write failed:"):
+        raise HTTPException(status_code=502, detail=event.message or "Relay hardware write failed.")
+
+
 @router.post("/relays/{relay_id}/set", response_model=RelayOut)
 def admin_set_relay(
     relay_id: str,
@@ -481,10 +488,11 @@ def admin_set_relay(
             return serialize_relay(relay)
         raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
     try:
-        relay, _event = apply_state(
+        relay, event = apply_state(
             db, relay_id, payload.on, controller,
             action="set", trigger_source="api", machine_key=settings.collector_id,
         )
+        _raise_if_hardware_write_failed(event)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return serialize_relay(relay)
@@ -537,9 +545,10 @@ def admin_relay_toggle(
             return serialize_relay(relay)
         raise HTTPException(status_code=503, detail="Relay controller is not initialized.")
     try:
-        relay, _event = toggle_relay(
+        relay, event = toggle_relay(
             db, relay_id, controller, trigger_source="api", machine_key=settings.collector_id
         )
+        _raise_if_hardware_write_failed(event)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return serialize_relay(relay)
