@@ -454,6 +454,44 @@
       let currentMachineId = "machine-1";
       let selectedCollectorKey = "";
 
+      function appendMachineKey(path) {
+        if (!selectedCollectorKey) return path;
+        const join = path.includes("?") ? "&" : "?";
+        return `${path}${join}machine_key=${encodeURIComponent(selectedCollectorKey)}`;
+      }
+
+      function updateCollectorSelection(collectors) {
+        const selector = document.getElementById("collectorSelector");
+        const hint = document.getElementById("collectorSelectionHint");
+        if (!selector || !hint) return;
+        const options = (collectors || []).map((c) => c.machine_key || c.id).filter(Boolean);
+        const deduped = [...new Set(options)];
+        if (!deduped.length) {
+          selectedCollectorKey = "";
+          selector.innerHTML = '<option value="">No collectors online</option>';
+          selector.disabled = true;
+          hint.textContent = "No collector selected — relay controls disabled";
+          return;
+        }
+        if (!selectedCollectorKey || !deduped.includes(selectedCollectorKey)) {
+          selectedCollectorKey = deduped[0];
+        }
+        selector.disabled = false;
+        selector.innerHTML = deduped
+          .map((key) => {
+            const safeKey = escapeHtml(key);
+            const selected = key === selectedCollectorKey ? "selected" : "";
+            return `<option value="${safeKey}" ${selected}>${safeKey}</option>`;
+          })
+          .join("");
+        selector.onchange = () => {
+          selectedCollectorKey = selector.value || "";
+          hint.textContent = `Target: ${selectedCollectorKey || "none"}`;
+          refreshAll().catch(console.error);
+        };
+        hint.textContent = `Target: ${selectedCollectorKey}`;
+      }
+
       function fmtDate(value) {
         if (!value) return "None";
         return new Date(value).toLocaleString();
@@ -1082,10 +1120,6 @@
 
       document.getElementById("refreshButton").addEventListener("click", refreshAll);
       document.getElementById("historyWindow").addEventListener("change", refreshAll);
-      document.getElementById("collectorSelector").addEventListener("change", (e) => {
-        selectedCollectorKey = e.target.value || "";
-        refreshAll().catch(console.error);
-      });
       document.getElementById("triggerButton").addEventListener("click", async () => {
         await getJson(`/api/machines/${currentMachineId}/trigger`, { method: "POST" });
         await refreshAll();
@@ -1117,30 +1151,3 @@
     </script>
   </body>
 </html>
-      function appendMachineKey(path) {
-        if (!selectedCollectorKey) return path;
-        const join = path.includes("?") ? "&" : "?";
-        return `${path}${join}machine_key=${encodeURIComponent(selectedCollectorKey)}`;
-      }
-
-      function updateCollectorSelection(collectors) {
-        const selector = document.getElementById("collectorSelector");
-        const hint = document.getElementById("collectorSelectionHint");
-        const options = (collectors || []).map((c) => c.machine_key || c.id).filter(Boolean);
-        const deduped = [...new Set(options)];
-        if (!deduped.length) {
-          selectedCollectorKey = "";
-          selector.innerHTML = '<option value="">No collectors online</option>';
-          selector.disabled = true;
-          hint.textContent = "No collector selected (relay controls disabled)";
-          return;
-        }
-        if (!selectedCollectorKey || !deduped.includes(selectedCollectorKey)) {
-          selectedCollectorKey = deduped[0];
-        }
-        selector.disabled = false;
-        selector.innerHTML = deduped
-          .map((k) => `<option value="${escapeHtml(k)}" ${k === selectedCollectorKey ? "selected" : ""}>${escapeHtml(k)}</option>`)
-          .join("");
-        hint.textContent = `Target: ${selectedCollectorKey}`;
-      }
