@@ -91,6 +91,49 @@ def test_relay_bit_out_of_port_range_is_rejected(bit):
         _settings(relay_1_bit=bit)
 
 
+def test_relays_sharing_a_bit_are_rejected():
+    """Two relays on one bit would switch together — a hardware hazard."""
+    with pytest.raises(ValidationError):
+        _settings(relay_1_bit=2, relay_2_bit=2)
+
+
+def test_max_activation_duration_has_a_safe_default():
+    assert _settings().relay_max_activation_seconds == 300
+
+
+@pytest.mark.parametrize("value", [0, -1, 90000])
+def test_max_activation_duration_out_of_range_is_rejected(value):
+    with pytest.raises(ValidationError):
+        _settings(relay_max_activation_seconds=value)
+
+
+def test_mcc_digital_port_is_normalised():
+    assert _settings(mcc_digital_port=" firstportb ").mcc_digital_port == "FIRSTPORTB"
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_mcc_digital_port_is_rejected(value):
+    with pytest.raises(ValidationError):
+        _settings(mcc_digital_port=value)
+
+
+def test_negative_mcc_board_number_is_rejected():
+    with pytest.raises(ValidationError):
+        _settings(mcc_board_num=-1)
+
+
+def test_windows_mcc_settings_are_inert_in_hub_mode():
+    """A hub parses MCC settings from a shared .env but never builds the driver."""
+    from app.services.relay_controller import build_relay_controller
+
+    settings = _settings(app_mode="hub", mcc_board_num=7, mcc_digital_port="FIRSTPORTA")
+    assert settings.runs_local_hardware is False
+    # build_relay_controller is only reached when runs_local_hardware; with the
+    # default RELAY_CONTROLLER=mock it stays on the mock path regardless.
+    assert type(build_relay_controller(settings)).__name__ == "MockRelayController"
+    assert "mcculw" not in sys.modules
+
+
 def test_all_modes_start_and_serve_routes():
     """Boots app.main once per APP_MODE in a subprocess with mock hardware.
 

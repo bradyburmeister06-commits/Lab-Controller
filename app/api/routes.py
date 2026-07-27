@@ -41,6 +41,9 @@ from app.schemas import (
     MachineOut,
     MachineUpdate,
     ManualTriggerOut,
+    RelayActivateIn,
+    RelayActivationOut,
+    RelayAllOffOut,
     RelayControllerInfoOut,
     RelayEventOut,
     RelayOut,
@@ -62,6 +65,12 @@ from app.services import collector_hub
 from app.services.collector_hub import InvalidMachineKey, validate_machine_key
 from app.services.machine_controller import build_controller
 from app.services.machine_service import get_last_activation, get_machine, reschedule_machine, seconds_until, trigger_machine
+from app.services.relay_activation import (
+    InvalidDurationError,
+    RelayBusyError,
+    RelayDisabledError,
+)
+from app.services.relay_controller import RelayError
 from app.services.relay_service import apply_state, list_relays, relay_history, toggle_relay
 from app.services.sensor_service import latest_by_sensor, recent_readings
 
@@ -211,8 +220,11 @@ def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
     scheduler = getattr(request.app.state, "machine_scheduler", None)
     sensor_manager = getattr(request.app.state, "sensor_manager", None)
     relay_scheduler = getattr(request.app.state, "relay_scheduler", None)
+    relay_controller = getattr(request.app.state, "relay_controller", None)
+    relay_activator = getattr(request.app.state, "relay_activator", None)
     collector_agent = getattr(request.app.state, "collector_agent", None)
     sync = collector_agent.status() if collector_agent is not None else {}
+    relay_health = relay_controller.health() if relay_controller is not None else {}
     return HealthOut(
         status="ok",
         database="ok",
@@ -227,6 +239,14 @@ def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
         last_sync_at=sync.get("last_sync_at"),
         pending_readings=sync.get("pending_readings"),
         pending_relay_events=sync.get("pending_relay_events"),
+        relay_controller_initialized=relay_health.get("initialized"),
+        relay_states=relay_health.get("states"),
+        relay_max_activation_seconds=(
+            settings.relay_max_activation_seconds if relay_controller is not None else None
+        ),
+        active_relay_activations=(
+            sorted(relay_activator.active_relays) if relay_activator is not None else None
+        ),
     )
 
 
@@ -503,6 +523,64 @@ def admin_set_relay(
     return serialize_relay(relay)
 
 
+@router.post("/relays/all-off", response_model=RelayAllOffOut)
+def admin_relays_all_off(
+    request: Request,
+    _: str = Depends(require_admin),
+) -> RelayAllOffOut:
+    """Operator panic button: de-energise every relay on this machine now.
+
+    Admin-only, and deliberately not machine-scoped — it acts on the hardware
+    this process owns, so it still works when the hub is unreachable.
+    """
+    activator = getattr(request.app.state, "relay_activator", None)
+    if activator is None:
+        raise HTTPException(status_code=503, detail="This process owns no relay hardware.")
+    success = activator.all_off("api")
+    relays = sorted(activator.controller.bit_map)
+    return RelayAllOffOut(
+        success=success,
+        relays_off=relays if success else [],
+        message="All relays off." if success else "all_off failed; relay state is unknown.",
+    )
+
+
+@router.post("/relays/{relay_id}/activate", response_model=RelayActivationOut)
+async def admin_activate_relay(
+    relay_id: str,
+    payload: RelayActivateIn,
+    request: Request,
+    _: str = Depends(require_admin),
+) -> RelayActivationOut:
+    """Energise one relay for a bounded duration, guaranteeing it turns off."""
+    activator = getattr(request.app.state, "relay_activator", None)
+    if activator is None:
+        raise HTTPException(status_code=503, detail="This process owns no relay hardware.")
+    try:
+        outcome = await activator.activate(
+            relay_id, payload.duration_seconds, trigger_source="api"
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidDurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RelayDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RelayBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RelayError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return RelayActivationOut(
+        relay_id=outcome.relay_id,
+        requested_seconds=outcome.requested_seconds,
+        elapsed_seconds=outcome.elapsed_seconds,
+        started_at=outcome.started_at,
+        ended_at=outcome.ended_at,
+        completed=outcome.completed,
+        message=outcome.message,
+    )
+
+
 @router.post("/relays/{relay_id}/on", response_model=RelayOut)
 def admin_relay_on(
     relay_id: str,
@@ -673,6 +751,19 @@ def admin_update_relay_schedule(
     key = _resolve_schedule_machine_key(machine_key)
     sched = _ensure_schedule_row(db, key, relay_id)
 
+    max_activation = get_settings().relay_max_activation_seconds
+    if (
+        payload.on_duration_seconds is not None
+        and payload.on_duration_seconds > max_activation
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"on_duration_seconds {payload.on_duration_seconds}s exceeds the "
+                f"configured maximum activation of {max_activation}s."
+            ),
+        )
+
     if payload.on_duration_seconds is not None:
         sched.on_duration_seconds = payload.on_duration_seconds
     if payload.off_duration_seconds is not None:
@@ -771,7 +862,7 @@ def admin_relay_controller_info(
     target_id = machine_key or settings.collector_id
     if controller is not None and target_id == settings.collector_id:
         latch = int(getattr(controller, "latch", 0)) & 0xFF
-        initialized = bool(getattr(controller, "_configured", True))
+        initialized = bool(getattr(controller, "initialized", False))
     else:
         # Surface the remote collector's last reported relay-controller status.
         collector = db.get(Collector, target_id)

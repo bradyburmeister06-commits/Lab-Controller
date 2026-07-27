@@ -4,7 +4,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -91,12 +91,37 @@ class Settings(BaseSettings):
     sensor_reconnect_delay_seconds: float = Field(default=2.0, ge=0.1, le=300.0)
 
     relay_controller: Literal["mock", "mcc_usb1208fs_plus"] = "mock"
-    mcc_board_num: int = 0
+    # Windows-only MCC settings. Parsed in every mode so a shared .env stays
+    # valid, but only read by MccUsb1208FsPlusController, which is never built
+    # in hub mode.
+    mcc_board_num: int = Field(default=0, ge=0, le=99)
     mcc_digital_port: str = "FIRSTPORTB"
     relay_1_bit: int = Field(default=0, ge=0, le=7)
     relay_2_bit: int = Field(default=1, ge=0, le=7)
     relay_3_bit: int = Field(default=2, ge=0, le=7)
     relay_active_high: bool = True
+
+    # Hardware protection: no single relay activation may exceed this, whether
+    # it came from the API, the local scheduler, or a hub command.
+    relay_max_activation_seconds: int = Field(default=300, ge=1, le=86400)
+
+    @field_validator("mcc_digital_port", mode="after")
+    @classmethod
+    def _validate_mcc_port(cls, value: str) -> str:
+        port = value.strip().upper()
+        if not port:
+            raise ValueError("MCC_DIGITAL_PORT must not be empty.")
+        return port
+
+    @model_validator(mode="after")
+    def _validate_relay_bits(self) -> "Settings":
+        bits = [self.relay_1_bit, self.relay_2_bit, self.relay_3_bit]
+        if len(set(bits)) != len(bits):
+            raise ValueError(
+                "RELAY_1_BIT, RELAY_2_BIT and RELAY_3_BIT must be distinct; "
+                f"got {bits}. Two relays on one bit would switch together."
+            )
+        return self
 
     @field_validator("arduino_1_chamber_id", "arduino_2_chamber_id", mode="after")
     @classmethod

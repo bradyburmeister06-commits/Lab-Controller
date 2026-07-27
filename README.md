@@ -1149,6 +1149,29 @@ The USB-1208FS-Plus digital outputs are **TTL-level I/O**. They must **not** dri
 | `RELAY_2_BIT` | `1` | Bit index on the port for relay-2 |
 | `RELAY_3_BIT` | `2` | Bit index on the port for relay-3 |
 | `RELAY_ACTIVE_HIGH` | `true` | Set `false` if your relay board is active-low |
+| `RELAY_MAX_ACTIVATION_SECONDS` | `300` | Upper bound on any single timed activation or scheduled ON phase |
+
+The three bits must be distinct — startup fails otherwise, because two relays
+sharing a bit would switch together.
+
+### Relay safety commands
+
+Both endpoints require admin basic auth and act on the hardware owned by the
+process you call, so they keep working while the hub is unreachable.
+
+```bash
+# Timed activation — always turned off again, even on error or cancellation
+curl -u admin:PASSWORD -X POST http://localhost:8000/api/relays/relay-1/activate \
+     -H 'Content-Type: application/json' -d '{"duration_seconds": 30}'
+
+# Panic button: de-energise every relay now
+curl -u admin:PASSWORD -X POST http://localhost:8000/api/relays/all-off
+```
+
+`GET /api/health` reports `relay_controller_initialized`, `relay_states`,
+`relay_max_activation_seconds`, and `active_relay_activations`. The full
+fail-safe and scheduling contract is in
+[docs/relay-safety-scheduler.md](docs/relay-safety-scheduler.md).
 
 ### Windows-native setup
 

@@ -15,6 +15,31 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def aware_utcnow() -> datetime:
+    """Timezone-aware "now". Use for arithmetic and comparisons; convert with
+    :func:`to_naive_utc` before storing."""
+    return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime | None) -> datetime | None:
+    """Interpret a database timestamp as UTC.
+
+    Stored values are naive-UTC by convention, so this attaches the tzinfo that
+    SQLite dropped instead of assuming the process's local zone.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def to_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def new_record_id() -> str:
     """Identity a locally-created row keeps for its whole life.
 

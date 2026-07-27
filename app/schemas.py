@@ -93,6 +93,28 @@ class RelayScheduleUpdate(BaseModel):
     off_duration_seconds: int | None = Field(default=None, ge=1, le=86400)
 
 
+class RelayActivateIn(BaseModel):
+    # Zero and negative durations are rejected here as well as in
+    # RelayActivator, so a bad request never reaches the hardware path.
+    duration_seconds: float = Field(gt=0, le=86400)
+
+
+class RelayActivationOut(BaseModel):
+    relay_id: str
+    requested_seconds: float
+    elapsed_seconds: float
+    started_at: datetime
+    ended_at: datetime
+    completed: bool
+    message: str
+
+
+class RelayAllOffOut(BaseModel):
+    success: bool
+    relays_off: list[str]
+    message: str
+
+
 class RelayControllerInfoOut(BaseModel):
     mode: str
     active_high: bool
@@ -144,6 +166,10 @@ class HealthOut(BaseModel):
     last_sync_at: datetime | None = None
     pending_readings: int | None = None
     pending_relay_events: int | None = None
+    relay_controller_initialized: bool | None = None
+    relay_states: dict[str, bool] | None = None
+    relay_max_activation_seconds: int | None = None
+    active_relay_activations: list[str] | None = None
 
 
 class SystemLogOut(BaseModel):

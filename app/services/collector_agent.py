@@ -192,7 +192,7 @@ class CollectorAgent:
             "hostname": host,
             "software_version": self.settings.software_version,
             "relay_controller_mode": self.settings.relay_controller,
-            "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+            "relay_controller_initialized": bool(getattr(self.controller, "initialized", False)),
             "runtime_state": "starting",
         }
         self._post("/api/collector/register", payload, client=client)
@@ -209,7 +209,7 @@ class CollectorAgent:
             "hostname": host,
             "software_version": self.settings.software_version,
             "relay_controller_mode": self.settings.relay_controller,
-            "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+            "relay_controller_initialized": bool(getattr(self.controller, "initialized", False)),
             "runtime_state": "running",
             "status_message": (
                 f"ok; pending readings={self.pending_readings} "
@@ -428,6 +428,18 @@ class CollectorAgent:
 
     # --- applying hub state locally ---
 
+    def _sanitize_duration(self, value: Any, fallback: int) -> int:
+        """Clamp a hub-supplied cycle duration into a hardware-safe range.
+
+        The hub is trusted but not infallible; a malformed or oversized row
+        must not be able to hold a relay energised past the local cap.
+        """
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            seconds = int(fallback)
+        return max(1, min(seconds, self.settings.relay_max_activation_seconds))
+
     def _apply_schedules(self, hub_schedules: list[dict[str, Any]]) -> None:
         if not hub_schedules:
             return
@@ -450,8 +462,12 @@ class CollectorAgent:
                         machine_key=my_key,
                         relay_id=relay_id,
                         enabled=bool(hs.get("enabled", False)),
-                        on_duration_seconds=int(hs.get("on_duration_seconds", 60)),
-                        off_duration_seconds=int(hs.get("off_duration_seconds", 60)),
+                        on_duration_seconds=self._sanitize_duration(
+                            hs.get("on_duration_seconds", 60), 60
+                        ),
+                        off_duration_seconds=self._sanitize_duration(
+                            hs.get("off_duration_seconds", 60), 60
+                        ),
                         current_phase="off",
                         next_run_at=None,
                     )
@@ -461,11 +477,19 @@ class CollectorAgent:
                     if bool(local.enabled) != bool(hs.get("enabled", local.enabled)):
                         local.enabled = bool(hs.get("enabled"))
                         changed = True
-                    if local.on_duration_seconds != int(hs.get("on_duration_seconds", local.on_duration_seconds)):
-                        local.on_duration_seconds = int(hs.get("on_duration_seconds"))
+                    wanted_on = self._sanitize_duration(
+                        hs.get("on_duration_seconds", local.on_duration_seconds),
+                        local.on_duration_seconds,
+                    )
+                    if local.on_duration_seconds != wanted_on:
+                        local.on_duration_seconds = wanted_on
                         changed = True
-                    if local.off_duration_seconds != int(hs.get("off_duration_seconds", local.off_duration_seconds)):
-                        local.off_duration_seconds = int(hs.get("off_duration_seconds"))
+                    wanted_off = self._sanitize_duration(
+                        hs.get("off_duration_seconds", local.off_duration_seconds),
+                        local.off_duration_seconds,
+                    )
+                    if local.off_duration_seconds != wanted_off:
+                        local.off_duration_seconds = wanted_off
                         changed = True
                 if changed and self.scheduler is not None:
                     db.commit()

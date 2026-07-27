@@ -64,6 +64,38 @@ def relay_history(
     return list(db.execute(stmt).scalars())
 
 
+def record_event(
+    db: Session,
+    relay_id: str,
+    state: bool,
+    action: str,
+    message: str,
+    success: bool = True,
+    trigger_source: str = "api",
+    machine_key: str | None = None,
+) -> RelayEvent:
+    """Append a relay event without touching hardware.
+
+    Used by the fail-safe activation path to record activation start/end and
+    the failures around them. Written locally regardless of hub reachability;
+    the sync queue picks it up from ``synced_at IS NULL``.
+    """
+    event = RelayEvent(
+        relay_id=relay_id,
+        machine_key=machine_key,
+        collector_id=machine_key,
+        state=state,
+        action=action,
+        trigger_source=trigger_source,
+        success=success,
+        message=message,
+    )
+    db.add(event)
+    _commit(db)
+    db.refresh(event)
+    return event
+
+
 def apply_state(
     db: Session,
     relay_id: str,

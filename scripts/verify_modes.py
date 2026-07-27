@@ -99,6 +99,28 @@ def check(result: dict) -> list[str]:
     expect("health.database", health.get("database"), "ok")
     expect("health.app_mode", health.get("app_mode"), mode)
 
+    # Stage 4: a hardware-owning process must come up with its relay controller
+    # initialized and every relay de-energised. A hub reports neither.
+    if EXPECTED_SERVICES[mode]["relay_controller"]:
+        expect(
+            "health.relay_controller_initialized",
+            health.get("relay_controller_initialized"),
+            True,
+        )
+        expect(
+            "relays all off at startup",
+            sorted(set((health.get("relay_states") or {}).values())),
+            [False],
+        )
+        expect("health.active_relay_activations", health.get("active_relay_activations"), [])
+    else:
+        expect(
+            "health.relay_controller_initialized",
+            health.get("relay_controller_initialized"),
+            None,
+        )
+        expect("health.relay_states", health.get("relay_states"), None)
+
     for name, wanted in EXPECTED_SERVICES[mode].items():
         expect(f"service {name} built", result["services"].get(name), wanted)
 

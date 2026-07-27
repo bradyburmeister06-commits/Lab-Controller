@@ -18,8 +18,9 @@ not when the app starts serving:
 2. `controller = build_controller(settings)` — the `MachineController`
    (mock / Wake-on-LAN / shell command). Always built, in every mode.
 3. If `settings.runs_local_hardware` (i.e. mode is `collector` or `all_in_one`):
-   `relay_controller`, `machine_scheduler`, `relay_scheduler`, and
-   `sensor_manager` are constructed. Otherwise all four are `None`.
+   `relay_controller`, `machine_scheduler`, `relay_scheduler`,
+   `relay_activator`, and `sensor_manager` are constructed. Otherwise all five
+   are `None`.
 4. If `settings.app_mode == "collector"`: `collector_agent` is constructed.
    Otherwise `None`.
 
@@ -44,12 +45,23 @@ Runs on app startup, after import:
    and fills it as collectors register.
 3. `relay_controller.initialize()` — wrapped in try/except. On Linux/dev the
    MCC path raises (no `mcculw`) and is logged as a warning; startup continues.
-4. Publish singletons onto `app.state` (`machine_scheduler`, `sensor_manager`,
-   `relay_controller`, `relay_scheduler`, `collector_agent`). Routes read
-   hardware handles from `app.state`, never from module globals.
-5. Start each non-`None` service exactly once, in order: machine scheduler,
-   relay scheduler, sensor manager, collector agent.
-6. On shutdown, stop them in reverse order.
+4. `safe_all_off()` — every relay is de-energised **before** anything that could
+   fire one is started.
+5. `relay_scheduler.load_schedules()` — reload persisted duty cycles, clear any
+   relay the database still thinks is on, and skip cycles missed while the
+   process was down.
+6. Publish singletons onto `app.state` (`machine_scheduler`, `sensor_manager`,
+   `relay_controller`, `relay_scheduler`, `relay_activator`, `collector_agent`).
+   Routes read hardware handles from `app.state`, never from module globals.
+7. Start each non-`None` service exactly once, in order: sensor manager,
+   machine scheduler, relay scheduler, collector agent.
+8. If any startup step raises, `safe_all_off()` runs before the exception
+   propagates, so a partial startup cannot leave a relay energised.
+9. On shutdown: stop the schedulers first (no new transitions), then turn every
+   relay off, then stop the sensor readers and the collector agent.
+
+The full rationale and the relay fail-safe contract are in
+[docs/relay-safety-scheduler.md](relay-safety-scheduler.md).
 
 ## 2. What runs in each mode
 
@@ -72,6 +84,7 @@ Resulting services per process:
 | `RelayScheduler` | APScheduler `BackgroundScheduler` | yes | — | yes |
 | `SensorIngestionManager` | 1 `threading.Thread` per Arduino | yes | — | yes |
 | `RelayController` | in-process object | yes | — | yes |
+| `RelayActivator` | in-process object (asyncio) | yes | — | yes |
 | `CollectorAgent` | 1 `threading.Thread` | — | — | yes |
 
 Notes:
@@ -148,10 +161,17 @@ Every relay state change in the process funnels through a single function,
 `apply_state` writes the `Relay` row and appends a `RelayEvent` in one
 transaction, so state and audit log cannot diverge. Below it, a single
 `RelayController` instance per process holds the output byte (`_latch`) behind a
-`threading.Lock` and applies bit masking, so flipping one relay never disturbs
-another bit on the same MCC port. `RelayScheduler` adds a per-relay
-`threading.Lock` on top, so concurrent duty-cycle advances for the same relay
-are serialized.
+lock and applies bit masking, so flipping one relay never disturbs another bit
+on the same MCC port. `RelayScheduler` adds a per-relay `threading.Lock` on top,
+so concurrent duty-cycle advances for the same relay are serialized.
+
+Timed activations take a fourth path: `RelayActivator`
+(`app/services/relay_activation.py`) drives the controller's raising
+`turn_on`/`turn_off` directly, inside a `try/finally`, under a per-relay
+`asyncio.Lock`. It backs `POST /relays/{id}/activate` and the admin
+`POST /relays/all-off` panic button, and enforces
+`RELAY_MAX_ACTIVATION_SECONDS`. See
+[docs/relay-safety-scheduler.md](relay-safety-scheduler.md).
 
 ## 4. Hub ↔ collector data flow
 
