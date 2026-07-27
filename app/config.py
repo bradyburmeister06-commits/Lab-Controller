@@ -4,7 +4,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     arduino_2_name: str = "arduino-2"
     arduino_baudrate: int = 9600
     sensor_read_timeout_seconds: float = 2.0
+    # Optional. When set, a chamber id on the wire must match, which catches a
+    # swapped COM port configuration instead of silently mislabelling data.
+    arduino_1_chamber_id: str | None = None
+    arduino_2_chamber_id: str | None = None
+    sensor_reconnect_delay_seconds: float = Field(default=2.0, ge=0.1, le=300.0)
 
     relay_controller: Literal["mock", "mcc_usb1208fs_plus"] = "mock"
     mcc_board_num: int = 0
@@ -83,6 +88,13 @@ class Settings(BaseSettings):
     relay_2_bit: int = Field(default=1, ge=0, le=7)
     relay_3_bit: int = Field(default=2, ge=0, le=7)
     relay_active_high: bool = True
+
+    @field_validator("arduino_1_chamber_id", "arduino_2_chamber_id", mode="after")
+    @classmethod
+    def _blank_chamber_id_is_unset(cls, value: str | None) -> str | None:
+        # An empty ARDUINO_n_CHAMBER_ID= in .env must mean "no chamber check",
+        # not "the chamber named empty string".
+        return value.strip() or None if value else None
 
     @property
     def cors_origin_list(self) -> list[str]:

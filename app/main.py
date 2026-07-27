@@ -40,13 +40,14 @@ if settings.runs_local_hardware:
     relay_scheduler = RelayScheduler(relay_controller, machine_key=settings.collector_id)
     sensor_manager = SensorIngestionManager(
         devices=[
-            SensorDevice(settings.arduino_1_name, settings.arduino_1_port),
-            SensorDevice(settings.arduino_2_name, settings.arduino_2_port),
+            SensorDevice(settings.arduino_1_name, settings.arduino_1_port, settings.arduino_1_chamber_id),
+            SensorDevice(settings.arduino_2_name, settings.arduino_2_port, settings.arduino_2_chamber_id),
         ],
         baudrate=settings.arduino_baudrate,
         timeout_seconds=settings.sensor_read_timeout_seconds,
         simulator=settings.sensor_simulator,
         machine_key=settings.collector_id,
+        reconnect_delay_seconds=settings.sensor_reconnect_delay_seconds,
     )
 else:
     relay_controller = None

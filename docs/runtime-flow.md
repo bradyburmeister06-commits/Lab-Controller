@@ -128,6 +128,13 @@ guarded optional import. In simulator mode (`SENSOR_SIMULATOR=true`, the
 default) the same threads generate synthetic readings instead and no serial port
 is touched.
 
+Each reader owns its port for its whole lifecycle — open, read, error, reconnect
+— and never raises out of its thread, so one dead Arduino cannot stop the other.
+Per-device connection state, last valid reading and last serial error are
+available from `SensorIngestionManager.status()`. The line format, validation
+rules and reconnect backoff are documented in
+[`docs/arduino-collection.md`](arduino-collection.md).
+
 ### One writer per relay
 
 Every relay state change in the process funnels through a single function,

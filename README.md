@@ -355,28 +355,31 @@ Open:
 
 ## Arduino data format
 
-Each Arduino should print one reading per line over serial. Either format is supported:
+Each Arduino prints one reading per line over serial, as comma-separated
+`key=value` pairs. `temp` and `rh` are required; the rest are optional and
+unknown keys are ignored:
 
 ```text
-temp=72.4,rh=48.1
+chamber=chamber-a,temp=72.4,rh=48.1,uptime=930112,fw=1.4.2,actuator=on
 ```
 
-or:
+A single-line JSON object with the same keys also works:
 
 ```json
-{"temp":72.4,"rh":48.1}
+{"chamber":"chamber-a","temp":72.4,"rh":48.1}
 ```
 
 Example Arduino loop:
 
 ```cpp
 void loop() {
-  float temp = 72.4; // replace with your sensor library reading
-  float rh = 48.1;
-  Serial.print("temp=");
-  Serial.print(temp);
+  Serial.print("chamber=chamber-a,temp=");
+  Serial.print(readTemperature());
   Serial.print(",rh=");
-  Serial.println(rh);
+  Serial.print(readHumidity());
+  Serial.print(",uptime=");
+  Serial.print(millis());
+  Serial.println(",fw=1.4.2");
   delay(10000);
 }
 ```
@@ -387,10 +390,19 @@ Set the serial ports in `.env`:
 SENSOR_SIMULATOR=false
 ARDUINO_1_PORT=/dev/ttyACM0
 ARDUINO_1_NAME=arduino-1
+ARDUINO_1_CHAMBER_ID=chamber-a
 ARDUINO_2_PORT=/dev/ttyACM1
 ARDUINO_2_NAME=arduino-2
+ARDUINO_2_CHAMBER_ID=chamber-b
 ARDUINO_BAUDRATE=9600
+SENSOR_RECONNECT_DELAY_SECONDS=2
 ```
+
+Each Arduino is read by its own thread and reconnects on its own after a
+disconnect, so one failed board never stops the other. Setting
+`ARDUINO_*_CHAMBER_ID` makes a swapped COM port assignment fail loudly instead
+of recording data under the wrong chamber. Full format and validation rules:
+[`docs/arduino-collection.md`](docs/arduino-collection.md).
 
 On Linux, find ports with:
 

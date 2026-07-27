@@ -106,3 +106,12 @@ def test_all_modes_start_and_serve_routes():
         timeout=300,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("value", ["", "   ", None])
+def test_blank_arduino_chamber_id_disables_the_chamber_check(value):
+    assert _settings(arduino_1_chamber_id=value).arduino_1_chamber_id is None
+
+
+def test_arduino_chamber_id_is_kept_when_set():
+    assert _settings(arduino_2_chamber_id=" chamber-b ").arduino_2_chamber_id == "chamber-b"
