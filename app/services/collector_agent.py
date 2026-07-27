@@ -3,6 +3,11 @@
 Runs on the lab/Windows machine. Pushes sensor readings, relay events, and
 heartbeats to the hub; polls for desired schedules and commands; applies them
 to local hardware via the existing relay controller / scheduler.
+
+Stage 3 replaced the in-memory id watermark with a durable sync queue. Records
+are written to local SQLite by the sensor and relay services before any upload
+is attempted, and are only stamped ``synced_at`` once the hub confirms them.
+Collection and relay control never wait on the network.
 """
 from __future__ import annotations
 
@@ -17,23 +22,28 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db.models import Relay, RelayEvent, RelaySchedule, SensorReading, utcnow
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, session_scope
+from app.services import sync_queue
 from app.services.relay_controller import RelayController
 from app.services.relay_scheduler import RelayScheduler
 from app.services.relay_service import apply_state, toggle_relay
+from app.services.sync_queue import STREAM_READINGS, STREAM_RELAY_EVENTS, StreamBackoff
 
 
 logger = logging.getLogger("app.collector_agent")
 
 
+class SyncError(RuntimeError):
+    """An upload attempt failed. The batch stays pending and is retried."""
+
+
 class CollectorAgent:
     """Background loop that syncs the local lab hardware with the hub.
 
-    The agent uses the local SQLite DB as a transient buffer: sensor readings
-    and relay events written by the existing services on the collector machine
-    are read out, shipped to the hub, and tracked by id watermarks so we never
-    duplicate uploads. Schedule/command pulls are applied to local hardware via
-    the same RelayScheduler used in single-machine mode.
+    Each responsibility is a separate method so it can be driven directly from
+    tests without starting the thread: :meth:`register_collector`,
+    :meth:`send_heartbeat`, :meth:`poll_schedules`,
+    :meth:`push_pending_readings`, :meth:`push_pending_relay_events`.
     """
 
     def __init__(
@@ -47,50 +57,63 @@ class CollectorAgent:
         self.scheduler = relay_scheduler
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_sensor_id = 0
-        self._last_relay_event_id = 0
         self._consecutive_errors = 0
         self._registered = False
+        self._backoff = {
+            stream: StreamBackoff(
+                base=settings.collector_sync_backoff_base_seconds,
+                maximum=settings.collector_sync_backoff_max_seconds,
+            )
+            for stream in (STREAM_READINGS, STREAM_RELAY_EVENTS)
+        }
+        self.last_sync_at: datetime | None = None
+        self.pending_readings = 0
+        self.pending_relay_events = 0
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def collector_id(self) -> str:
+        return self.settings.collector_id
+
     def start(self) -> None:
         if self.running:
             return
         self._stop.clear()
-        self._init_watermarks()
+        self.refresh_pending_counts()
         self._thread = threading.Thread(target=self._run, daemon=True, name="collector-agent")
         self._thread.start()
 
     def stop(self) -> None:
+        """Signal shutdown and wait briefly for the loop to reach a safe point.
+
+        The loop only ever sleeps on ``self._stop``, so a stop during a backoff
+        wait returns immediately instead of blocking for the full delay.
+        """
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
 
-    # --- internal helpers ---
+    @property
+    def cancelled(self) -> bool:
+        return self._stop.is_set()
 
-    def _init_watermarks(self) -> None:
-        with SessionLocal() as db:
-            last_s = db.execute(
-                select(SensorReading.id)
-                .where(SensorReading.machine_key == self.settings.collector_id)
-                .order_by(SensorReading.id.desc())
-                .limit(1)
-            ).scalar() or db.execute(
-                select(SensorReading.id).order_by(SensorReading.id.desc()).limit(1)
-            ).scalar()
-            last_e = db.execute(
-                select(RelayEvent.id)
-                .where(RelayEvent.machine_key == self.settings.collector_id)
-                .order_by(RelayEvent.id.desc())
-                .limit(1)
-            ).scalar() or db.execute(
-                select(RelayEvent.id).order_by(RelayEvent.id.desc()).limit(1)
-            ).scalar()
-        self._last_sensor_id = int(last_s or 0)
-        self._last_relay_event_id = int(last_e or 0)
+    def status(self) -> dict[str, Any]:
+        """Sync health for the health endpoint and operator troubleshooting."""
+        return {
+            "collector_id": self.collector_id,
+            "registered": self._registered,
+            "running": self.running,
+            "last_sync_at": self.last_sync_at,
+            "pending_readings": self.pending_readings,
+            "pending_relay_events": self.pending_relay_events,
+            "reading_sync_failures": self._backoff[STREAM_READINGS].failures,
+            "relay_event_sync_failures": self._backoff[STREAM_RELAY_EVENTS].failures,
+        }
+
+    # --- HTTP ---
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -98,6 +121,12 @@ class CollectorAgent:
             timeout=self.settings.collector_request_timeout_seconds,
             headers={"X-Collector-Token": self.settings.collector_api_token},
         )
+
+    def _safe(self, message: object) -> str:
+        """Never let the shared secret reach a log line."""
+        return sync_queue.redact(message, self.settings.collector_api_token)
+
+    # --- loop ---
 
     def _run(self) -> None:
         push_interval = max(1, int(self.settings.collector_push_interval_seconds))
@@ -108,163 +137,301 @@ class CollectorAgent:
             now = utcnow()
             try:
                 if not self._registered:
-                    self._register_once()
+                    self.register_collector()
                 if now >= next_push:
-                    self._push_once()
+                    self.send_heartbeat()
+                    self.sync_once()
                     next_push = utcnow() + timedelta(seconds=push_interval)
                 if now >= next_poll:
-                    self._poll_once()
+                    self.poll_schedules()
                     next_poll = utcnow() + timedelta(seconds=poll_interval)
                 self._consecutive_errors = 0
             except Exception as exc:  # pragma: no cover - network paths
                 self._consecutive_errors += 1
-                backoff = min(60, 2 ** min(6, self._consecutive_errors))
+                backoff = sync_queue.backoff_seconds(
+                    self._consecutive_errors,
+                    self.settings.collector_sync_backoff_base_seconds,
+                    self.settings.collector_sync_backoff_max_seconds,
+                )
                 logger.warning(
                     "collector loop error (#%s): %s; sleeping %ss",
                     self._consecutive_errors,
-                    exc,
+                    self._safe(exc),
                     backoff,
                 )
                 self._stop.wait(backoff)
                 continue
             self._stop.wait(1)
 
-    def _register_once(self) -> None:
+    def sync_once(self) -> None:
+        """Run both upload streams. Neither can prevent the other from running.
+
+        A failing stream raises inside its own method; catching here is what
+        stops one bad batch from taking down the sync service.
+        """
+        for push in (self.push_pending_readings, self.push_pending_relay_events):
+            if self._stop.is_set():
+                return
+            try:
+                push()
+            except SyncError as exc:
+                logger.warning("sync stream failed: %s", self._safe(exc))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("unexpected sync failure: %s", self._safe(exc))
+
+    # --- individual responsibilities ---
+
+    def register_collector(self, client: httpx.Client | None = None) -> None:
         host = socket.gethostname()
-        with self._client() as client:
-            client.post(
-                "/api/collector/register",
-                json={
-                    "collector_id": self.settings.collector_id,
-                    "name": self.settings.collector_name,
-                    "display_name": self.settings.collector_name,
-                    "mode": self.settings.app_mode,
-                    "host": host,
-                    "hostname": host,
-                    "software_version": self.settings.software_version,
-                    "relay_controller_mode": self.settings.relay_controller,
-                    "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
-                    "runtime_state": "starting",
-                },
-            ).raise_for_status()
+        payload = {
+            "collector_id": self.collector_id,
+            "name": self.settings.collector_name,
+            "display_name": self.settings.collector_name,
+            "mode": self.settings.app_mode,
+            "host": host,
+            "hostname": host,
+            "software_version": self.settings.software_version,
+            "relay_controller_mode": self.settings.relay_controller,
+            "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+            "runtime_state": "starting",
+        }
+        self._post("/api/collector/register", payload, client=client)
         self._registered = True
 
-    def _push_once(self) -> None:
+    def send_heartbeat(self, client: httpx.Client | None = None) -> None:
         host = socket.gethostname()
-        with self._client() as client, SessionLocal() as db:
-            client.post(
-                "/api/collector/heartbeat",
-                json={
-                    "collector_id": self.settings.collector_id,
-                    "name": self.settings.collector_name,
-                    "display_name": self.settings.collector_name,
-                    "mode": self.settings.app_mode,
-                    "host": host,
-                    "hostname": host,
-                    "software_version": self.settings.software_version,
-                    "relay_controller_mode": self.settings.relay_controller,
-                    "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
-                    "runtime_state": "running",
-                    "status_message": "ok",
-                },
-            ).raise_for_status()
+        payload = {
+            "collector_id": self.collector_id,
+            "name": self.settings.collector_name,
+            "display_name": self.settings.collector_name,
+            "mode": self.settings.app_mode,
+            "host": host,
+            "hostname": host,
+            "software_version": self.settings.software_version,
+            "relay_controller_mode": self.settings.relay_controller,
+            "relay_controller_initialized": bool(getattr(self.controller, "_configured", True)),
+            "runtime_state": "running",
+            "status_message": (
+                f"ok; pending readings={self.pending_readings} "
+                f"relay_events={self.pending_relay_events}"
+            ),
+        }
+        self._post("/api/collector/heartbeat", payload, client=client)
 
-            new_readings = list(
-                db.execute(
-                    select(SensorReading)
-                    .where(SensorReading.id > self._last_sensor_id)
-                    .order_by(SensorReading.id.asc())
-                    .limit(500)
-                ).scalars()
+    def push_pending_readings(self) -> int:
+        """Upload one batch of unsynced readings. Returns records confirmed."""
+        return self._push_stream(
+            stream=STREAM_READINGS,
+            endpoint="/api/collector/readings/batch",
+            body_key="readings",
+            serialize=self._serialize_reading,
+        )
+
+    def push_pending_relay_events(self) -> int:
+        """Upload one batch of unsynced relay events plus current relay states."""
+        return self._push_stream(
+            stream=STREAM_RELAY_EVENTS,
+            endpoint="/api/collector/relay-events/batch",
+            body_key="events",
+            serialize=self._serialize_relay_event,
+            extra_body=self._relay_states,
+        )
+
+    def poll_schedules(self, client: httpx.Client | None = None) -> dict[str, Any]:
+        """Pull hub-owned schedules and commands and apply them locally.
+
+        Deliberately independent of the upload streams: relays keep following
+        the hub's schedule even while the backlog cannot be shipped.
+        """
+        owns_client = client is None
+        client = client or self._client()
+        try:
+            response = client.get(
+                "/api/collector/poll", params={"collector_id": self.collector_id}
             )
-            if new_readings:
-                client.post(
-                    "/api/collector/sensor-readings",
-                    json={
-                        "collector_id": self.settings.collector_id,
-                        "readings": [
-                            {
-                                "sensor_name": r.sensor_name,
-                                "temperature": r.temperature,
-                                "relative_humidity": r.relative_humidity,
-                                "recorded_at": _iso(r.recorded_at),
-                                "raw_payload": r.raw_payload,
-                            }
-                            for r in new_readings
-                        ],
-                    },
-                ).raise_for_status()
-                self._last_sensor_id = new_readings[-1].id
-
-            new_events = list(
-                db.execute(
-                    select(RelayEvent)
-                    .where(RelayEvent.id > self._last_relay_event_id)
-                    .order_by(RelayEvent.id.asc())
-                    .limit(500)
-                ).scalars()
-            )
-            relays = list(db.execute(select(Relay)).scalars())
-            relay_states = {r.id: bool(r.is_on) for r in relays}
-            if new_events or relay_states:
-                client.post(
-                    "/api/collector/relay-events",
-                    json={
-                        "collector_id": self.settings.collector_id,
-                        "events": [
-                            {
-                                "relay_id": e.relay_id,
-                                "state": bool(e.state),
-                                "action": e.action,
-                                "trigger_source": e.trigger_source,
-                                "success": bool(e.success),
-                                "message": e.message,
-                                "occurred_at": _iso(e.created_at),
-                            }
-                            for e in new_events
-                        ],
-                        "relay_states": relay_states,
-                    },
-                ).raise_for_status()
-                if new_events:
-                    self._last_relay_event_id = new_events[-1].id
-
-    def _poll_once(self) -> None:
-        with self._client() as client:
-            r = client.get(
-                "/api/collector/poll",
-                params={"collector_id": self.settings.collector_id},
-            )
-            r.raise_for_status()
-            data = r.json()
-
-            # Sync schedule rows from hub into local DB so the local
-            # RelayScheduler executes the hub-owned configuration. The hub
-            # already filters this list to schedules scoped to our
-            # collector_id, but we double-check defensively below — a
-            # collector must NEVER apply another machine's intervals to its
-            # own hardware.
+            response.raise_for_status()
+            data = response.json()
             self._apply_schedules(data.get("relay_schedules") or [])
-
             for cmd in data.get("commands") or []:
+                if self._stop.is_set():
+                    break
                 ok, msg = self._apply_command(cmd)
                 try:
                     client.post(
                         "/api/collector/command-ack",
                         json={
-                            "collector_id": self.settings.collector_id,
+                            "collector_id": self.collector_id,
                             "command_id": cmd["id"],
                             "success": ok,
                             "message": msg,
                         },
                     ).raise_for_status()
                 except Exception as exc:  # pragma: no cover
-                    logger.warning("ack failed for command %s: %s", cmd.get("id"), exc)
+                    logger.warning(
+                        "ack failed for command %s: %s", cmd.get("id"), self._safe(exc)
+                    )
+            return data
+        finally:
+            if owns_client:
+                client.close()
+
+    def refresh_pending_counts(self) -> tuple[int, int]:
+        with SessionLocal() as db:
+            self.pending_readings = sync_queue.pending_count(
+                db, STREAM_READINGS, self.collector_id
+            )
+            self.pending_relay_events = sync_queue.pending_count(
+                db, STREAM_RELAY_EVENTS, self.collector_id
+            )
+        return self.pending_readings, self.pending_relay_events
+
+    # --- upload plumbing ---
+
+    def _push_stream(
+        self,
+        *,
+        stream: str,
+        endpoint: str,
+        body_key: str,
+        serialize,
+        extra_body=None,
+    ) -> int:
+        backoff = self._backoff[stream]
+        if not backoff.ready():
+            return 0
+
+        batch_size = self.settings.collector_sync_batch_size
+        with SessionLocal() as db:
+            rows = sync_queue.pending_records(db, stream, self.collector_id, batch_size)
+            if not rows:
+                # An empty queue is healthy, not stalled. Deliberately no write
+                # here: the push interval would otherwise dirty sync_state on
+                # every tick of an idle collector.
+                self._set_pending(stream, 0)
+                backoff.on_success()
+                return 0
+            by_local_id = {row.local_record_id: row.id for row in rows}
+            body: dict[str, Any] = {
+                "collector_id": self.collector_id,
+                body_key: [serialize(row) for row in rows],
+            }
+            if extra_body is not None:
+                body.update(extra_body(db))
+            row_ids = [row.id for row in rows]
+
+        try:
+            result = self._post(endpoint, body)
+        except SyncError as exc:
+            delay = backoff.on_failure()
+            message = self._safe(exc)
+            with session_scope() as tx:
+                sync_queue.mark_failed(tx, stream, row_ids, message)
+                sync_queue.record_failure(
+                    tx, self.collector_id, stream, error=message, pending=len(row_ids)
+                )
+            logger.warning(
+                "%s upload failed (%s records); retrying in %ss: %s",
+                stream,
+                len(row_ids),
+                delay,
+                message,
+            )
+            raise
+
+        # Duplicates are records the hub already holds, so they are done. Not
+        # confirming them would make a retried batch pend forever.
+        confirmed_local = list(result.get("accepted") or []) + list(result.get("duplicates") or [])
+        confirmed_ids = [by_local_id[lid] for lid in confirmed_local if lid in by_local_id]
+
+        rejected = result.get("rejected") or []
+        if rejected:
+            # Rejects are permanent (bad range, unknown relay). Mark them synced
+            # so a poison record cannot block the queue behind it forever.
+            rejected_ids = [
+                by_local_id[item["local_record_id"]]
+                for item in rejected
+                if item.get("local_record_id") in by_local_id
+            ]
+            logger.warning(
+                "hub rejected %s %s record(s): %s",
+                len(rejected),
+                stream,
+                self._safe(rejected[:3]),
+            )
+            confirmed_ids.extend(rejected_ids)
+
+        with session_scope() as tx:
+            synced = sync_queue.mark_synced(tx, stream, confirmed_ids)
+            remaining = sync_queue.pending_count(tx, stream, self.collector_id)
+            sync_queue.record_success(
+                tx, self.collector_id, stream, synced=synced, pending=remaining
+            )
+
+        backoff.on_success()
+        self.last_sync_at = utcnow()
+        self._set_pending(stream, remaining)
+        return synced
+
+    def _set_pending(self, stream: str, value: int) -> None:
+        if stream == STREAM_READINGS:
+            self.pending_readings = value
+        else:
+            self.pending_relay_events = value
+
+    def _post(
+        self, endpoint: str, body: dict[str, Any], client: httpx.Client | None = None
+    ) -> dict[str, Any]:
+        owns_client = client is None
+        client = client or self._client()
+        try:
+            response = client.post(endpoint, json=body)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError:
+                return {}
+        except httpx.HTTPStatusError as exc:
+            raise SyncError(
+                f"{endpoint} returned {exc.response.status_code}: {exc.response.text[:200]}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise SyncError(f"{endpoint} transport error: {exc}") from exc
+        finally:
+            if owns_client:
+                client.close()
+
+    def _serialize_reading(self, row: SensorReading) -> dict[str, Any]:
+        return {
+            "local_record_id": row.local_record_id,
+            "sensor_name": row.sensor_name,
+            "temperature": row.temperature,
+            "relative_humidity": row.relative_humidity,
+            "recorded_at": _iso(row.recorded_at),
+            "raw_payload": row.raw_payload,
+        }
+
+    def _serialize_relay_event(self, row: RelayEvent) -> dict[str, Any]:
+        return {
+            "local_record_id": row.local_record_id,
+            "relay_id": row.relay_id,
+            "state": bool(row.state),
+            "action": row.action,
+            "trigger_source": row.trigger_source,
+            "success": bool(row.success),
+            "message": row.message,
+            "occurred_at": _iso(row.created_at),
+        }
+
+    def _relay_states(self, db) -> dict[str, Any]:
+        relays = list(db.execute(select(Relay)).scalars())
+        return {"relay_states": {r.id: bool(r.is_on) for r in relays}}
+
+    # --- applying hub state locally ---
 
     def _apply_schedules(self, hub_schedules: list[dict[str, Any]]) -> None:
         if not hub_schedules:
             return
-        my_key = self.settings.collector_id
+        my_key = self.collector_id
         with SessionLocal() as db:
             for hs in hub_schedules:
                 # Defensive scoping: ignore any schedule row not scoped to us.
@@ -319,13 +486,13 @@ class CollectorAgent:
                     apply_state(
                         db, relay_id, on, self.controller,
                         action="set", trigger_source="hub",
-                        machine_key=self.settings.collector_id,
+                        machine_key=self.collector_id,
                     )
                     return True, f"set {relay_id} {'on' if on else 'off'}"
                 if ctype == "relay_toggle" and relay_id:
                     toggle_relay(
                         db, relay_id, self.controller,
-                        trigger_source="hub", machine_key=self.settings.collector_id,
+                        trigger_source="hub", machine_key=self.collector_id,
                     )
                     return True, f"toggled {relay_id}"
                 if ctype == "schedule_changed":
@@ -334,7 +501,7 @@ class CollectorAgent:
             return False, f"unknown command_type {ctype!r}"
         except Exception as exc:
             logger.exception("command apply failed")
-            return False, str(exc)
+            return False, self._safe(exc)
 
 
 def _iso(dt: datetime | None) -> str | None:

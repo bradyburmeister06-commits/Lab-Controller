@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from statistics import mean
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import desc, select
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin, require_collector_token
@@ -19,6 +22,7 @@ from app.db.models import (
     SensorReading,
     SystemLog,
 )
+from app.db.models import utcnow as _utcnow
 from app.db.init_db import ensure_machine_schedules
 from app.db.session import get_db
 from app.schemas import (
@@ -47,6 +51,10 @@ from app.schemas import (
     RoomSummaryOut,
     SensorLatestOut,
     SensorReadingOut,
+    SyncBatchOut,
+    SyncReadingBatchIn,
+    SyncRejectedRecord,
+    SyncRelayEventBatchIn,
     SystemLogOut,
     DataSummaryOut,
 )
@@ -56,6 +64,8 @@ from app.services.machine_controller import build_controller
 from app.services.machine_service import get_last_activation, get_machine, reschedule_machine, seconds_until, trigger_machine
 from app.services.relay_service import apply_state, list_relays, relay_history, toggle_relay
 from app.services.sensor_service import latest_by_sensor, recent_readings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -202,6 +212,7 @@ def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
     sensor_manager = getattr(request.app.state, "sensor_manager", None)
     relay_scheduler = getattr(request.app.state, "relay_scheduler", None)
     collector_agent = getattr(request.app.state, "collector_agent", None)
+    sync = collector_agent.status() if collector_agent is not None else {}
     return HealthOut(
         status="ok",
         database="ok",
@@ -213,6 +224,9 @@ def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
         sensor_manager_running=bool(sensor_manager and sensor_manager.running) if sensor_manager is not None else None,
         relay_scheduler_running=bool(relay_scheduler and relay_scheduler.running) if relay_scheduler is not None else None,
         hub_base_url=settings.hub_base_url if settings.app_mode == "collector" else None,
+        last_sync_at=sync.get("last_sync_at"),
+        pending_readings=sync.get("pending_readings"),
+        pending_relay_events=sync.get("pending_relay_events"),
     )
 
 
@@ -965,9 +979,11 @@ def collector_ingest_sensor_readings(
         kwargs = dict(
             sensor_name=reading.sensor_name,
             machine_key=payload.collector_id,
+            collector_id=payload.collector_id,
             temperature=reading.temperature,
             relative_humidity=reading.relative_humidity,
             raw_payload=reading.raw_payload,
+            synced_at=_utcnow(),
         )
         if reading.recorded_at is not None:
             ts = reading.recorded_at
@@ -1003,11 +1019,13 @@ def collector_ingest_relay_events(
             RelayEvent(
                 relay_id=evt.relay_id,
                 machine_key=payload.collector_id,
+                collector_id=payload.collector_id,
                 state=evt.state,
                 action=evt.action,
                 trigger_source=evt.trigger_source or "collector",
                 success=evt.success,
                 message=evt.message,
+                synced_at=_utcnow(),
             )
         )
         inserted += 1
@@ -1018,11 +1036,217 @@ def collector_ingest_relay_events(
             continue
         if relay.is_on != bool(on):
             relay.is_on = bool(on)
-            from app.db.models import utcnow as _utcnow
-
             relay.last_changed_at = _utcnow()
     db.commit()
     return {"inserted": inserted}
+
+
+# --- Stage 3 batch ingestion (sync queue) ---
+
+# A timestamp this far ahead means a broken collector clock, not a real reading.
+_MAX_CLOCK_SKEW_SECONDS = 86400
+
+
+def _prepare_batch(
+    db: Session,
+    collector_id: str,
+    request: Request,
+    size: int,
+) -> None:
+    """Shared gate for both batch endpoints: identity, then batch size.
+
+    Raises HTTPException with a plain message — collectors retry on these, so
+    the response has to say what to fix without leaking hub internals.
+    """
+    try:
+        validate_machine_key(collector_id)
+    except InvalidMachineKey as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    limit = get_settings().hub_max_batch_size
+    if size > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch too large: {size} records, limit is {limit}.",
+        )
+    collector_hub.upsert_collector(
+        db, collector_id=collector_id, last_seen_ip=_client_ip(request)
+    )
+
+
+def _normalize_timestamp(value: datetime | None) -> datetime:
+    """Coerce an incoming timestamp to naive UTC, rejecting implausible clocks."""
+    if value is None:
+        return _utcnow()
+    ts = value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+    if (ts - _utcnow()).total_seconds() > _MAX_CLOCK_SKEW_SECONDS:
+        raise ValueError("timestamp is too far in the future")
+    return ts
+
+
+def _already_stored(db: Session, model, collector_id: str, local_ids: list[str]) -> set[str]:
+    """Local record ids this collector has already delivered.
+
+    Looked up in one query per batch so a retried batch of 200 costs one
+    round trip rather than 200.
+    """
+    if not local_ids:
+        return set()
+    rows = db.execute(
+        select(model.local_record_id).where(
+            model.collector_id == collector_id,
+            model.local_record_id.in_(local_ids),
+        )
+    ).scalars()
+    return {row for row in rows if row is not None}
+
+
+def _commit_batch(db: Session) -> None:
+    """Land the whole batch or none of it.
+
+    Partial application is the one outcome the collector cannot recover from:
+    it would mark records synced that the hub never stored.
+    """
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Two collector threads racing the same batch. The rows are on the hub
+        # either way, so the retry will come back as duplicates.
+        raise HTTPException(
+            status_code=409, detail="Conflicting concurrent batch; retry this batch."
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("batch ingestion failed")
+        raise HTTPException(status_code=500, detail="Could not store batch.") from None
+
+
+@router.post("/collector/readings/batch", response_model=SyncBatchOut)
+def collector_readings_batch(
+    payload: SyncReadingBatchIn,
+    request: Request,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> SyncBatchOut:
+    """Ingest a batch of locally-buffered sensor readings.
+
+    Idempotent on (collector_id, local_record_id): resending a batch the hub
+    already stored returns those ids under ``duplicates``, which the collector
+    treats as success. That is what makes a response timeout safe to retry.
+    """
+    _prepare_batch(db, payload.collector_id, request, len(payload.readings))
+
+    local_ids = [r.local_record_id for r in payload.readings]
+    stored = _already_stored(db, SensorReading, payload.collector_id, local_ids)
+
+    accepted: list[str] = []
+    duplicates: list[str] = []
+    rejected: list[SyncRejectedRecord] = []
+    seen: set[str] = set()
+
+    for reading in payload.readings:
+        rid = reading.local_record_id
+        # A batch that repeats an id within itself is still only one record.
+        if rid in stored or rid in seen:
+            duplicates.append(rid)
+            continue
+        try:
+            recorded_at = _normalize_timestamp(reading.recorded_at)
+        except ValueError as exc:
+            rejected.append(SyncRejectedRecord(local_record_id=rid, reason=str(exc)))
+            continue
+        seen.add(rid)
+        db.add(
+            SensorReading(
+                sensor_name=reading.chamber_id or reading.sensor_name,
+                machine_key=payload.collector_id,
+                collector_id=payload.collector_id,
+                local_record_id=rid,
+                temperature=reading.temperature,
+                relative_humidity=reading.relative_humidity,
+                recorded_at=recorded_at,
+                raw_payload=reading.raw_payload,
+                synced_at=_utcnow(),
+            )
+        )
+        accepted.append(rid)
+
+    _commit_batch(db)
+    return SyncBatchOut(
+        collector_id=payload.collector_id,
+        accepted=accepted,
+        duplicates=duplicates,
+        rejected=rejected,
+    )
+
+
+@router.post("/collector/relay-events/batch", response_model=SyncBatchOut)
+def collector_relay_events_batch(
+    payload: SyncRelayEventBatchIn,
+    request: Request,
+    _: str = Depends(require_collector_token),
+    db: Session = Depends(get_db),
+) -> SyncBatchOut:
+    """Ingest a batch of locally-buffered relay events, plus current relay states."""
+    _prepare_batch(db, payload.collector_id, request, len(payload.events))
+
+    local_ids = [e.local_record_id for e in payload.events]
+    stored = _already_stored(db, RelayEvent, payload.collector_id, local_ids)
+
+    accepted: list[str] = []
+    duplicates: list[str] = []
+    rejected: list[SyncRejectedRecord] = []
+    seen: set[str] = set()
+
+    for evt in payload.events:
+        rid = evt.local_record_id
+        if rid in stored or rid in seen:
+            duplicates.append(rid)
+            continue
+        if db.get(Relay, evt.relay_id) is None:
+            rejected.append(
+                SyncRejectedRecord(local_record_id=rid, reason=f"unknown relay_id {evt.relay_id}")
+            )
+            continue
+        try:
+            occurred_at = _normalize_timestamp(evt.occurred_at)
+        except ValueError as exc:
+            rejected.append(SyncRejectedRecord(local_record_id=rid, reason=str(exc)))
+            continue
+        seen.add(rid)
+        db.add(
+            RelayEvent(
+                relay_id=evt.relay_id,
+                machine_key=payload.collector_id,
+                collector_id=payload.collector_id,
+                local_record_id=rid,
+                state=evt.state,
+                action=evt.action,
+                trigger_source=evt.trigger_source or "collector",
+                success=evt.success,
+                message=evt.message,
+                created_at=occurred_at,
+                synced_at=_utcnow(),
+            )
+        )
+        accepted.append(rid)
+
+    for relay_id, on in (payload.relay_states or {}).items():
+        relay = db.get(Relay, relay_id)
+        if relay is None or relay.is_on == bool(on):
+            continue
+        relay.is_on = bool(on)
+        relay.last_changed_at = _utcnow()
+
+    _commit_batch(db)
+    return SyncBatchOut(
+        collector_id=payload.collector_id,
+        accepted=accepted,
+        duplicates=duplicates,
+        rejected=rejected,
+    )
+
 
 
 @router.get("/collector/poll", response_model=CollectorPollOut)

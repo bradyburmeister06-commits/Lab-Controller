@@ -10,6 +10,16 @@ from app.services.relay_controller import RelayController
 DEFAULT_RELAY_IDS = ("relay-1", "relay-2", "relay-3")
 
 
+def _commit(db: Session) -> None:
+    """Commit, rolling back so a failed write never leaves the session dirty for
+    the next relay operation on the same connection."""
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def list_relays(db: Session) -> list[Relay]:
     return list(
         db.execute(select(Relay).order_by(Relay.display_order, Relay.id)).scalars()
@@ -68,6 +78,7 @@ def apply_state(
         event = RelayEvent(
             relay_id=relay.id,
             machine_key=machine_key,
+            collector_id=machine_key,
             state=relay.is_on,
             action=action,
             trigger_source=trigger_source,
@@ -75,7 +86,7 @@ def apply_state(
             message=f"Relay {relay.id} is disabled in configuration; ignoring on command.",
         )
         db.add(event)
-        db.commit()
+        _commit(db)
         db.refresh(relay)
         db.refresh(event)
         return relay, event
@@ -83,9 +94,12 @@ def apply_state(
     if result.success:
         relay.is_on = on
         relay.last_changed_at = utcnow()
+    # Recorded locally whether or not the hub is reachable; the sync queue picks
+    # it up later from synced_at IS NULL.
     event = RelayEvent(
         relay_id=relay.id,
         machine_key=machine_key,
+        collector_id=machine_key,
         state=on,
         action=action,
         trigger_source=trigger_source,
@@ -93,7 +107,7 @@ def apply_state(
         message=result.message,
     )
     db.add(event)
-    db.commit()
+    _commit(db)
     db.refresh(relay)
     db.refresh(event)
     return relay, event

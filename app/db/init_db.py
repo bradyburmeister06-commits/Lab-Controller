@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db.models import Collector, Machine, Relay, RelaySchedule, utcnow
 from app.db.session import Base, engine
+
+
+logger = logging.getLogger(__name__)
 
 
 _RELAY_COLUMN_MIGRATIONS: dict[str, str] = {
@@ -18,10 +23,23 @@ _RELAY_COLUMN_MIGRATIONS: dict[str, str] = {
 
 _RELAY_EVENT_COLUMN_MIGRATIONS: dict[str, str] = {
     "machine_key": "VARCHAR(64)",
+    "local_record_id": "VARCHAR(64)",
+    "collector_id": "VARCHAR(64)",
+    "synced_at": "DATETIME",
+    "sync_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "last_sync_error": "TEXT",
 }
 
 _SENSOR_READING_COLUMN_MIGRATIONS: dict[str, str] = {
     "machine_key": "VARCHAR(64)",
+    "local_record_id": "VARCHAR(64)",
+    "collector_id": "VARCHAR(64)",
+    # No DEFAULT CURRENT_TIMESTAMP: SQLite would backfill existing rows with the
+    # migration time, which reads as "collected now". Backfilled below instead.
+    "created_at": "DATETIME",
+    "synced_at": "DATETIME",
+    "sync_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "last_sync_error": "TEXT",
 }
 
 _COLLECTOR_COLUMN_MIGRATIONS: dict[str, str] = {
@@ -36,17 +54,22 @@ _COLLECTOR_COLUMN_MIGRATIONS: dict[str, str] = {
 }
 
 
-def _add_missing_columns(table: str, migrations: dict[str, str]) -> None:
+def _add_missing_columns(table: str, migrations: dict[str, str]) -> set[str]:
+    """Add any columns the model declares but the live table lacks.
+
+    Returns the names actually added so callers can backfill only those.
+    """
     inspector = inspect(engine)
     if table not in inspector.get_table_names():
-        return
+        return set()
     existing = {col["name"] for col in inspector.get_columns(table)}
     missing = [(name, ddl) for name, ddl in migrations.items() if name not in existing]
     if not missing:
-        return
+        return set()
     with engine.begin() as conn:
         for name, ddl in missing:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+    return {name for name, _ in missing}
 
 
 def _migrate_relay_schedules() -> None:
@@ -104,13 +127,64 @@ def _migrate_relay_schedules() -> None:
             )
 
 
+def _backfill_sync_columns(table: str, added: set[str], created_at_source: str) -> None:
+    """Give rows that predate the sync queue a coherent sync state.
+
+    Anything already in the database was written before Stage 3 existed, so the
+    old id-watermark loop already shipped it. Marking those rows synced is what
+    stops an upgrade from re-uploading the entire history on first boot.
+    """
+    if not added:
+        return
+    with engine.begin() as conn:
+        if "created_at" in added:
+            conn.execute(
+                text(f"UPDATE {table} SET created_at = {created_at_source} WHERE created_at IS NULL")
+            )
+        if "collector_id" in added:
+            conn.execute(
+                text(f"UPDATE {table} SET collector_id = machine_key WHERE collector_id IS NULL")
+            )
+        if "synced_at" in added:
+            conn.execute(
+                text(f"UPDATE {table} SET synced_at = {created_at_source} WHERE synced_at IS NULL")
+            )
+
+
+def _create_missing_indexes() -> None:
+    """Create indexes declared on tables that already existed.
+
+    ``create_all`` skips an existing table wholesale, including its indexes, so
+    indexes added in a later stage need an explicit pass.
+    """
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in table_names:
+            continue
+        existing = {idx["name"] for idx in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in existing:
+                continue
+            try:
+                index.create(bind=engine)
+            except OperationalError:
+                # A unique index can legitimately fail on a database that already
+                # holds conflicting rows. Duplicate protection then falls back to
+                # the explicit lookup the ingestion endpoints do anyway.
+                logger.warning("could not create index %s on %s", index.name, table.name)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _add_missing_columns("relays", _RELAY_COLUMN_MIGRATIONS)
-    _add_missing_columns("relay_events", _RELAY_EVENT_COLUMN_MIGRATIONS)
-    _add_missing_columns("sensor_readings", _SENSOR_READING_COLUMN_MIGRATIONS)
+    relay_event_added = _add_missing_columns("relay_events", _RELAY_EVENT_COLUMN_MIGRATIONS)
+    reading_added = _add_missing_columns("sensor_readings", _SENSOR_READING_COLUMN_MIGRATIONS)
     _add_missing_columns("collectors", _COLLECTOR_COLUMN_MIGRATIONS)
+    _backfill_sync_columns("relay_events", relay_event_added, "created_at")
+    _backfill_sync_columns("sensor_readings", reading_added, "recorded_at")
     _migrate_relay_schedules()
+    _create_missing_indexes()
     # Backfill display_name on collectors that were created with the legacy "name" column.
     inspector = inspect(engine)
     cols = {col["name"] for col in inspector.get_columns("collectors")} if "collectors" in inspector.get_table_names() else set()

@@ -52,15 +52,22 @@ def save_reading(
     raw_payload: str | None,
     machine_key: str | None = None,
 ) -> SensorReading:
+    """Persist a reading locally. This always happens before any upload attempt,
+    so a reading survives a hub outage that starts a millisecond later."""
     reading = SensorReading(
         sensor_name=sensor_name,
         machine_key=machine_key,
+        collector_id=machine_key,
         temperature=temperature,
         relative_humidity=relative_humidity,
         raw_payload=raw_payload,
     )
     db.add(reading)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(reading)
     return reading
 

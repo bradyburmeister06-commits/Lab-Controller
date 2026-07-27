@@ -1711,6 +1711,17 @@ working. After this you should see the collector show up under
   `/admin` and `/` pages are not used in split mode; do all your dashboard
   work through the hub.
 
+  Readings and relay events are written to the collector's local SQLite
+  database **before** any upload is attempted and are only marked synced once
+  the hub confirms them, so an unreachable hub delays data rather than losing
+  it. The backlog uploads in batches on reconnect, and the hub ignores records
+  it already holds so a retried batch never double-stores. Tuning knobs:
+  `COLLECTOR_SYNC_BATCH_SIZE` (default 200), `HUB_MAX_BATCH_SIZE` (default 500,
+  set on the hub), `COLLECTOR_SYNC_BACKOFF_BASE_SECONDS` (2.0) and
+  `COLLECTOR_SYNC_BACKOFF_MAX_SECONDS` (300.0). `GET /api/health` reports
+  `last_sync_at`, `pending_readings`, and `pending_relay_events`. Full design:
+  [docs/sync-queue.md](docs/sync-queue.md).
+
   To run it as a Windows service, you can use NSSM:
 
   ```bat

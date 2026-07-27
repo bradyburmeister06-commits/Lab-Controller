@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MachineOut(BaseModel):
@@ -141,6 +141,9 @@ class HealthOut(BaseModel):
     sensor_manager_running: bool | None = None
     relay_scheduler_running: bool | None = None
     hub_base_url: str | None = None
+    last_sync_at: datetime | None = None
+    pending_readings: int | None = None
+    pending_relay_events: int | None = None
 
 
 class SystemLogOut(BaseModel):
@@ -247,6 +250,78 @@ class CollectorRelayBatchIn(BaseModel):
     collector_id: str
     events: list[CollectorRelayEventIn] = Field(default_factory=list)
     relay_states: dict[str, bool] = Field(default_factory=dict)
+
+
+# --- Stage 3 sync-queue batch ingestion ---
+
+# Mirrors arduino_protocol's hard ranges. A reading outside these is corrupt
+# rather than merely unusual, so the hub refuses to store it.
+READING_TEMPERATURE_RANGE = (-40.0, 185.0)
+READING_HUMIDITY_RANGE = (0.0, 100.0)
+
+LOCAL_RECORD_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+
+
+class SyncReadingIn(BaseModel):
+    """One locally-stored sensor reading offered to the hub for ingestion."""
+
+    local_record_id: str = Field(pattern=LOCAL_RECORD_ID_RE)
+    sensor_name: str = Field(min_length=1, max_length=64)
+    chamber_id: str | None = Field(default=None, max_length=64)
+    temperature: float = Field(ge=READING_TEMPERATURE_RANGE[0], le=READING_TEMPERATURE_RANGE[1])
+    relative_humidity: float = Field(ge=READING_HUMIDITY_RANGE[0], le=READING_HUMIDITY_RANGE[1])
+    recorded_at: datetime | None = None
+    raw_payload: str | None = Field(default=None, max_length=4000)
+
+
+class SyncReadingBatchIn(BaseModel):
+    collector_id: str
+    readings: list[SyncReadingIn] = Field(default_factory=list)
+
+
+class SyncRelayEventIn(BaseModel):
+    local_record_id: str = Field(pattern=LOCAL_RECORD_ID_RE)
+    relay_id: str = Field(min_length=1, max_length=64)
+    state: bool
+    action: str = Field(default="set", max_length=32)
+    trigger_source: str = Field(default="collector", max_length=32)
+    success: bool = True
+    message: str | None = Field(default=None, max_length=2000)
+    occurred_at: datetime | None = None
+
+
+class SyncRelayEventBatchIn(BaseModel):
+    collector_id: str
+    events: list[SyncRelayEventIn] = Field(default_factory=list)
+    relay_states: dict[str, bool] = Field(default_factory=dict)
+
+
+class SyncRejectedRecord(BaseModel):
+    local_record_id: str
+    reason: str
+
+
+class SyncBatchOut(BaseModel):
+    """Result of one batch.
+
+    ``duplicates`` are a success: the record is already on the hub, so the
+    collector must mark it synced rather than retrying it forever.
+    """
+
+    collector_id: str
+    accepted: list[str] = Field(default_factory=list)
+    duplicates: list[str] = Field(default_factory=list)
+    rejected: list[SyncRejectedRecord] = Field(default_factory=list)
+    accepted_count: int = 0
+    duplicate_count: int = 0
+    rejected_count: int = 0
+
+    @model_validator(mode="after")
+    def _fill_counts(self) -> "SyncBatchOut":
+        self.accepted_count = len(self.accepted)
+        self.duplicate_count = len(self.duplicates)
+        self.rejected_count = len(self.rejected)
+        return self
 
 
 class CollectorCommandOut(BaseModel):

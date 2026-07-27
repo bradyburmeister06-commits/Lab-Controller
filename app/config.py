@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     collector_poll_interval_seconds: int = Field(default=5, ge=1, le=3600)
     collector_request_timeout_seconds: float = 10.0
 
+    # Sync queue tuning. Batches are capped on both ends: the collector never
+    # sends more than sync_batch_size, the hub rejects anything over
+    # hub_max_batch_size, and the collector's cap must stay under the hub's.
+    collector_sync_batch_size: int = Field(default=200, ge=1, le=1000)
+    hub_max_batch_size: int = Field(default=500, ge=1, le=5000)
+    # Exponential backoff between failed upload attempts for one stream.
+    collector_sync_backoff_base_seconds: float = Field(default=2.0, ge=0.1, le=600.0)
+    collector_sync_backoff_max_seconds: float = Field(default=300.0, ge=1.0, le=86400.0)
+
     # Heartbeat staleness threshold for marking a collector offline.
     collector_stale_after_seconds: int = Field(default=60, ge=5, le=86400)
 

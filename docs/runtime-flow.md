@@ -156,15 +156,19 @@ are serialized.
 ## 4. Hub ↔ collector data flow
 
 `CollectorAgent` (`services/collector_agent.py`) runs one loop thread on the
-collector, using the local SQLite DB as a transient buffer:
+collector. As of Stage 3 the local SQLite DB is a **durable queue**, not a
+transient buffer — see [docs/sync-queue.md](sync-queue.md) for the full design.
 
-- **Register** (once): `POST /api/collector/register`.
+- **Register** (once): `register_collector()` → `POST /api/collector/register`.
 - **Push** (every `COLLECTOR_PUSH_INTERVAL_SECONDS`, default 10 s):
-  `POST /api/collector/heartbeat`, then new `SensorReading` rows to
-  `/api/collector/sensor-readings` and new `RelayEvent` rows plus a full
-  `relay_states` snapshot to `/api/collector/relay-events`. Uploads are tracked
-  by monotonic row-id watermarks (`_last_sensor_id`, `_last_relay_event_id`), so
-  rows are never sent twice.
+  `send_heartbeat()`, then `push_pending_readings()` and
+  `push_pending_relay_events()` ship capped batches of rows whose `synced_at`
+  is still `NULL` to `/api/collector/readings/batch` and
+  `/api/collector/relay-events/batch`. Rows are stamped `synced_at` only after
+  the hub confirms them, and the hub de-duplicates on
+  `(collector_id, local_record_id)` so a retried batch cannot double-store.
+  The pre-Stage-3 id-watermark endpoints (`/api/collector/sensor-readings`,
+  `/api/collector/relay-events`) still exist and still work.
 - **Poll** (every `COLLECTOR_POLL_INTERVAL_SECONDS`, default 5 s):
   `GET /api/collector/poll` returns relays, schedule rows scoped to this
   `collector_id`, and pending commands. Schedules are mirrored into the local
@@ -173,10 +177,13 @@ collector, using the local SQLite DB as a transient buffer:
   `/api/collector/command-ack`.
 
 All collector endpoints require the `X-Collector-Token` header
-(`app/auth.py::require_collector_token`). Failures back off exponentially
-(capped at 60 s) and never kill the loop — a collector with an unreachable hub
-keeps running its local schedule. This is verified by `scripts/verify_modes.py`,
-which boots collector mode against an unroutable `HUB_BASE_URL`.
+(`app/auth.py::require_collector_token`). Each upload stream backs off
+exponentially on its own (`COLLECTOR_SYNC_BACKOFF_*`), so a hub that rejects
+relay events cannot stall sensor readings, and no failure kills the loop — a
+collector with an unreachable hub keeps sampling Arduinos and running its local
+schedule, then ships the backlog on reconnect. This is verified by
+`scripts/verify_modes.py`, which boots collector mode against an unroutable
+`HUB_BASE_URL`.
 
 ### Machine-key scoping
 
