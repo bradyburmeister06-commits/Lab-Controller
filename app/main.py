@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,8 @@ from app.services.relay_scheduler import RelayScheduler
 from app.services.scheduler import MachineScheduler
 from app.services.sensor_service import SensorDevice, SensorIngestionManager
 
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 settings = get_settings()
 controller = build_controller(settings)
@@ -120,14 +123,14 @@ app.include_router(router, prefix="/api")
 
 @app.get("/", include_in_schema=False)
 def root_dashboard():
-    return FileResponse("app/static/public.html")
+    return FileResponse(STATIC_DIR / "public.html")
 
 
 @app.get("/public", include_in_schema=False)
 def public_dashboard_page():
-    return FileResponse("app/static/public.html")
+    return FileResponse(STATIC_DIR / "public.html")
 
 
 @app.get("/admin", include_in_schema=False)
 def sysadmin_dashboard(_: str = Depends(require_admin)):
-    return FileResponse("app/static/index.html")
+    return FileResponse(STATIC_DIR / "index.html")

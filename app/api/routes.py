@@ -12,7 +12,6 @@ from app.config import get_settings, is_valid_machine_key
 from app.db.models import (
     ActivationEvent,
     Collector,
-    CollectorCommand,
     Machine,
     Relay,
     RelayEvent,

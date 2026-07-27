@@ -148,28 +148,7 @@ def ensure_default_relay_schedules(db: Session, machine_key: str | None = None) 
     In all_in_one and collector modes we seed schedules for the local machine.
     In hub mode we don't seed anything here — schedules are created the first
     time a collector registers (see ensure_machine_schedules)."""
-    settings = get_settings()
-    key = machine_key or settings.collector_id
-    schedules: list[RelaySchedule] = []
-    relays = db.query(Relay).all()
-    for relay in relays:
-        sched = db.get(RelaySchedule, (key, relay.id))
-        if sched is None:
-            sched = RelaySchedule(
-                machine_key=key,
-                relay_id=relay.id,
-                enabled=False,
-                on_duration_seconds=60,
-                off_duration_seconds=60,
-                next_run_at=None,
-                current_phase="off",
-            )
-            db.add(sched)
-        schedules.append(sched)
-    db.commit()
-    for sched in schedules:
-        db.refresh(sched)
-    return schedules
+    return ensure_machine_schedules(db, machine_key or get_settings().collector_id)
 
 
 def ensure_machine_schedules(db: Session, machine_key: str) -> list[RelaySchedule]:

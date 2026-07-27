@@ -6,7 +6,7 @@ from datetime import timedelta
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
-from app.db.models import Collector, CollectorCommand, RelayEvent, SensorReading, utcnow
+from app.db.models import Collector, CollectorCommand, SensorReading, utcnow
 from app.db.session import SessionLocal
 from app.main import app
 from app.services import collector_hub

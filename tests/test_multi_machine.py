@@ -15,7 +15,6 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
 from app.db.models import Collector, RelayEvent, RelaySchedule, SensorReading, utcnow
 from app.db.session import SessionLocal
 from app.main import app

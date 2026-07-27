@@ -4,7 +4,6 @@ import json
 import random
 import re
 import threading
-import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -138,6 +137,11 @@ class SensorIngestionManager:
         return any(t.is_alive() for t in self._threads) and not self._stop.is_set()
 
     def start(self) -> None:
+        # Idempotent: a second start() must not attach a second reader thread to
+        # the same Arduino, which would double-record every reading.
+        if self._threads:
+            return
+        self._stop.clear()
         for device in self.devices:
             target = self._simulate_device if self.simulator else self._read_serial_device
             thread = threading.Thread(target=target, args=(device,), daemon=True, name=f"sensor-{device.name}")
@@ -148,6 +152,7 @@ class SensorIngestionManager:
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=2)
+        self._threads.clear()
 
     def _simulate_device(self, device: SensorDevice) -> None:
         base_temp = random.uniform(68, 74)
